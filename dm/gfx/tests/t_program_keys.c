@@ -28,6 +28,12 @@ int main(int argc, char **argv) {
         CHECK(prog_key((prog_t *)&program, 0, got)); CHECK(!memcmp(got, expected, sizeof got));
     }
     CHECK(!prog_key((prog_t *)&program, 1, got));
+    NVNshaderData empty = {0};
+    CHECK(h_nvnProgramSetShaders(&program, 1, &empty));
+    memset(got, 0x5a, sizeof got);
+    CHECK(!prog_key((prog_t *)&program, 0, got));
+    CHECK(pk_get(&program, 0)->ok == 0);
+    for (unsigned i = 0; i < sizeof got; i++) CHECK(got[i] == 0x5a);
     CHECK(h_nvnProgramSetShaders(&program, 0, NULL));
     for (unsigned i = 0; i < 6; i++) CHECK(!pk_get(&program, 0)->control[i]);
     h_nvnProgramFinalize(&program); CHECK(!pk_get(&program, 0));

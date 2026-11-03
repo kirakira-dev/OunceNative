@@ -2702,7 +2702,8 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
     NvProg *o = [NvProg new];
     for (unsigned i = 0; i < p->nstage; i++) {
         // Key = sha256(first 0x880 bytes of the control section + code area): many of Mario's shaders share a control section but differ in code (dm/gfx/tools/shader_split.py). It was computed at SetShaders (hle_nvn.c): by now the game may have freed the control section
-        uint8_t md[8]; prog_key(p, i, md);
+        uint8_t md[8];
+        if (!prog_key(p, i, md)) { MLOG("[RED] program stage %u has no shader control", i); continue; }
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *stage = g_shmap[k];
         if (!stage) {   // Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
@@ -2711,7 +2712,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
             MLOG("[RED] shader %s is not in the shader map (DM_NVN_SHDUMP=directory saves its control section and code area)", k.UTF8String);
             // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (0x880-byte control section) and <key>.code (code area, length from control +0x704), to trace their source / add them to the map offline
             static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; }
-            if (shd) { char path[1024]; FILE *f; uint32_t ncode, nctl = 0x880; memcpy(&ncode, (const uint8_t *)p->sd[i].control + (DM_GAME_NX2 ? 0x38 : 0x704), 4);   // with SHDUMP set the control section is the host's copy
+            if (shd) { char path[1024]; FILE *f; uint32_t ncode, nctl = 0x880; memcpy(&ncode, (const uint8_t *)p->sd[i].control + (DM_GAME_NX2 ? 0x38 : 0x704), 4);   // The program owns its control section.
                 if (DM_GAME_NX2) nctl = nvn_nx2_control_size(p->sd[i].control);
                 snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, nctl, f); fclose(f); }
                 snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
@@ -5861,7 +5862,7 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     return 0;
 }
 // Diagnostic snapshots of the NVN bindings used by an NX2 graphics shader.
-// Requires SHDUMP, which owns the control-section copies. Only CPU-visible,
+// Requires SHDUMP to retain matching raw shader captures. Only CPU-visible,
 // current UBO values are recorded; pending GPU writes remain absent facts.
 static void nx2_capture_facts(int compute) {
     if (!DM_GAME_NX2) return;

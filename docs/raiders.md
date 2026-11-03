@@ -2,9 +2,11 @@
 
 The development profile is `0400380020056000`, using update `v65536`, SDK 21.4.4, and NVN 231.39. Module IDs are recorded in `dm/games/0400380020056000/game.tsv`. The base build is identified, but runtime testing uses the update.
 
-The tested route covers native boot, menus, character creation, save reload, the airship conversations, and the first island. Virtual motion input completes the aiming tutorial, walking collects the first shard, and firing paints the ground. These checks also passed in the packaged app with an isolated save. The local package currently contains 1,272 translated shader programs. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes.
+The tested route covers native boot, menus, character creation, save reload, the airship conversations, and the first island. Virtual motion input completes the aiming tutorial, walking collects the first shard, and firing paints the ground. These checks also passed in the packaged app with an isolated save. The local package currently contains 1,274 translated shader programs. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes.
 
-The renderer fixes the opening scene's black output, swapped half-texture components, missing player skin, and command-list corruption. Recent tests report no missing shaders or pipeline errors along this route. Intermittent black areas remain on island scenery, including a longer run with large affected areas. The latest run kept the main terrain intact, but the cause is unresolved. Rendering has not been compared frame by frame with console output. On the tested M4, the airship and island scenes generally run around 20 to 30 FPS at handheld resolution. Audio produces nonzero output, but listening and synchronization checks remain incomplete.
+The renderer fixes the opening scene's black output, swapped half-texture components, missing player skin, and command-list corruption. A later black-frame failure was traced to a full conditional-render table: dropped timestamp reports let repeated clears erase the scene. Dynamic report tracking fixes that reproduced failure. Other terrain differences and later areas still need checking against console output. Audio produces nonzero output, but listening and synchronization checks remain incomplete.
+
+Handheld remains the default. In docked mode, the observed main scene renders at 2560 x 1440 and the game outputs 3840 x 2160, but the island route still has severe stalls. The tested M4 does not sustain 60 FPS. See [rendering and performance](performance.md) for measured changes and limits.
 
 ## Controls
 
