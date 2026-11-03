@@ -20,6 +20,8 @@ typedef struct {
     uint8_t dtt, dpf;        // Dummy texture when the texture slot is unbound: MTLTextureType value, pixel class
     uint16_t reg, aid;       // D3D register number, index within the argument buffer
     uint16_t off;            // TEXU / SAMPU: byte offset of the handle within the uniform buffer
+    uint16_t cb_span;        // Zero means the uniform read footprint is unknown.
+    uint64_t cb_words[4];    // Proven 32-bit reads within the first 1 KB.
 } nvn_rbind;
 enum { NVN_TESS_VERTEX_STRIDE = 608, NVN_TESS_PATCH_STRIDE = 512 };
 typedef struct { uint32_t locations; uint16_t builtins; uint8_t present; } nvn_tess_io;

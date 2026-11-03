@@ -478,7 +478,7 @@ NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
 static void pk_drop(const void *p);
 NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p); }
 // a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+typedef struct { uint8_t key[6][8]; uint8_t ok; void *control[6]; } prog_keys_t;
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -491,7 +491,7 @@ static prog_keys_t *pk_get(const void *p, int make) {
 static void pk_drop(const void *p) {
     pthread_mutex_lock(&g_pk_mu);
     prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;
-    if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
+    if (k) { CFDictionaryRemoveValue(g_pk, p); for (unsigned i = 0; i < 6; i++) free(k->control[i]); free(k); }
     pthread_mutex_unlock(&g_pk_mu);
 }
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
@@ -533,27 +533,34 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     prog_keys_t *k = pk_get(p, 1);
-    if (!(k->ok >> st & 1)) { keys_hash(&p->sd[st], 0, k->key[st]); k->ok |= (uint8_t)(1u << st); }
+    if (!(k->ok >> st & 1)) {
+        if (!keys_hash(&p->sd[st], 0, k->key[st])) return 0;
+        k->ok |= (uint8_t)(1u << st);
+    }
     memcpy(key, k->key[st], 8);
     return 1;
 }
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
-    mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
+    mtl_prog_release(o); o->nstage = n; if (n) memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
     // The keys are computed here (see prog_key in nvn_obj.h): the control section is only guaranteed valid during this call; the code area lives in a memory pool and stays valid while the program is in use
-    static int dump = -1; if (dump < 0) dump = getenv("DM_NVN_SHDUMP") != NULL;
     prog_keys_t *k = pk_get(p, 1);
+    void *controls[6] = {0};
     k->ok = 0;
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
-        // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
-        if (dump && sd[i].control) {
+        // Unmapped code is hashed at first use. The caller may release the
+        // control section immediately, so retain it independently of SHDUMP.
+        if (sd[i].control) {
             uint32_t size = 0x880;
             if (DM_GAME_NX2) size = nvn_nx2_control_size(sd[i].control);
-            void *c = malloc(size); memcpy(c, sd[i].control, size); o->sd[i].control = c;
+            else { uint32_t own; memcpy(&own, (const uint8_t *)sd[i].control + 0x20, 4); if (own >= 0x760 && own < size) size = own; }
+            void *c = malloc(size); if (!c) die("shader control allocation failed");
+            memcpy(c, sd[i].control, size); controls[i] = c; o->sd[i].control = c;
         }
     }
+    for (unsigned i = 0; i < 6; i++) { free(k->control[i]); k->control[i] = controls[i]; }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
 }

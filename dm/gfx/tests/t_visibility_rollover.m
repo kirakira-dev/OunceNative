@@ -46,7 +46,18 @@ int main(void) { @autoreleasepool {
         if (result[i][0] != 64) fprintf(stderr, "query %u got %llu samples\n", i, (unsigned long long)result[i][0]);
         CHECK(result[i][0] == 64);
     }
-    CHECK(result[QUERIES][0] == 128); vis_clear(); free(c.bytes); free(result);
-    printf("PASS %u occlusion reports across buffer rollover; mid-pass start, resets, cumulative reports and preserved samples\n", QUERIES + 1);
+    CHECK(result[QUERIES][0] == 128); vis_clear();
+    for (unsigned round = 0; round < 10; round++) {
+        c.length = 0;
+        emit(&c, OP_SET_RT, &rt, sizeof rt);
+        if (!round) emit(&c, OP_RESET_COUNTER, &type, 8);
+        emit(&c, OP_DRAW, &draw, sizeof draw);
+        emit(&c, OP_REPORT_COUNTER, report, sizeof report); emit(&c, OP_END, NULL, 0);
+        mtl_sub_begin(); mtl_exec(c.bytes);
+        CHECK(mtl_wait(mtl_sub_commit(), 10000000000ull)); CHECK(!mtl_last_commit_error());
+        CHECK(result[QUERIES][0] == (round + 1) * 64);
+    }
+    vis_clear(); free(c.bytes); free(result);
+    printf("PASS %u occlusion reports across buffer rollover; mid-pass start, resets, cumulative reports and cumulative samples across 10 submissions\n", QUERIES + 1);
     return 0;
 }}

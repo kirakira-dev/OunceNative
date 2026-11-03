@@ -114,6 +114,27 @@ def integer_vertex_inputs(src):
     return src
 
 
+def cbuf_read_words(src, name, ty):
+    """Prove direct uint4 reads in the first 1 KB, or leave the whole binding live."""
+    block = re.fullmatch(r'constant (\w+)\*', ty)
+    if not block or not re.search(r'\bstruct ' + re.escape(block[1]) +
+                                 r'\s*\{\s*uint4 data\[\d+\];\s*\};', src):
+        return None
+    reads = list(re.finditer(r'\(\*\w+\.' + re.escape(name) +
+                            r'\)\.data\[(\d+)u?\](?:\.([xyzw]{1,4})\b)?', src))
+    if not reads or len(re.findall(r'\b' + re.escape(name) + r'\b', src)) != len(reads) + 1:
+        return None
+    words = set()
+    for read in reads:
+        if src[read.end():].startswith('.'):
+            return None
+        base = int(read[1]) * 4
+        if base >= 256:
+            return None
+        words.update(base + 'xyzw'.index(c) for c in (read[2] or 'xyzw'))
+    return sorted(words)
+
+
 def describe(src, stage, meta, layout):
     bindings = []
     root = meta.get('native_root_table')
@@ -143,6 +164,9 @@ def describe(src, stage, meta, layout):
             b.update(kind='root_constants', reg=root['index'])
         elif cb and 3 <= int(cb[1]) < 19:
             b.update(kind='cbuf', reg=int(cb[1])-3)
+            reads = cbuf_read_words(src, name, ty)
+            if reads is not None:
+                b['read_words'] = reads
         elif cb and int(cb[1]) == 1:
             b.update(kind='c1')
         elif cb and int(cb[1]) == 0 and layout:
