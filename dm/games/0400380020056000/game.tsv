@@ -1,0 +1,33 @@
+# Splatoon Raiders, SDK 21.4.4. Native bring-up is in progress.
+title_id	0400380020056000
+program_id	0400380020056000
+platform	nx2
+device_api	231.39
+tick_hz	31250000
+name	Splatoon Raiders (development)
+ipa	SplatoonRaiders.ipa
+app_category	public.app-category.action-games
+package	v65536
+shader_versions	v65536
+modules	main subsdk0 sdk
+romfs_marker	Shader/Hoian_UBER.Product.110.product.Nin_Ounce_NVN2.bfsha.zs
+zip_store	.zs:.webm:.metallib
+mem_reserve	0x800000000
+mem_alias	0x500000000
+mem_stack	0x10000000
+app_pool	0x265100000
+tex_flush_upload	on
+render_cond	on
+op_mode	handheld
+pad_layout	full
+nvn_tex_base	0x20
+nvn_tex_slots	32
+nvn_samp_base	0x568
+nvn_img_base	0x120
+nvn_img_slots	8
+nvn_ssbo_bases	vs=0x110 ps=0x510 gs=0x410 hs=0x210 ds=0x310 cs=0x310
+shader_groups	/Shader/=shader /Layout/=layout /Effect/=effect /Pack/=pack
+shader_note	Raiders NX2 capture pipeline: resource types come from measured native bindings
+build	v0	unknown	main=abb30e2fb1cdf3bf618a0da346b6e427	subsdk0=07e685d1c23a77a389fd205288ae904c	sdk=41d4de4a3b78214ad20c896960df0e5e
+build	v65536	unknown	main=663c2e087a083f05307f229dfc4042d5	subsdk0=07e685d1c23a77a389fd205288ae904c	sdk=41d4de4a3b78214ad20c896960df0e5e
+shader_nx2_chain	387d8037caadf72acd2f9b7aeda49ab9d584bba4a13b6aad3a080c416c4a73da

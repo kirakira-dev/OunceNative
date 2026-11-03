@@ -1,0 +1,455 @@
+diff --git a/src/core/arm/hypervisor/arm_hypervisor.cpp b/src/core/arm/hypervisor/arm_hypervisor.cpp
+index 630df8c..b18eb23 100644
+--- a/src/core/arm/hypervisor/arm_hypervisor.cpp
++++ b/src/core/arm/hypervisor/arm_hypervisor.cpp
+@@ -12,6 +12,7 @@
+ #include "common/scope_exit.h"
+ #include "core/arm/hypervisor/arm_hypervisor.h"
+ #include "core/arm/hypervisor/hv_vm.h"
++#include "core/arm/hypervisor/probe.h"
+ #include "core/core.h"
+ #include "core/core_timing.h"
+ #include "core/hle/kernel/k_process.h"
+@@ -263,6 +264,60 @@ ArmHypervisor::Resolution ArmHypervisor::HandleLowerSync(Vcpu& vcpu, u64 esr, u6
+         return Resolution::Return;
+     }
+     case EcBrk64:
++        for (auto& probe : HvProbe::probes) {
++            if (probe.address != elr) continue;
++            u64 r[31]{};
++            for (u32 i = 0; i < 31; i++)
++                hv_vcpu_get_reg(vcpu.id, static_cast<hv_reg_t>(HV_REG_X0 + i), &r[i]);
++            const bool matches = probe.filter_reg < 0 ||
++                (m_process->GetMemory().IsValidVirtualAddress(r[probe.filter_reg] + probe.filter_offset + 7) &&
++                 m_process->GetMemory().Read64(r[probe.filter_reg] + probe.filter_offset) == probe.filter_value);
++            const auto hit = matches ? __atomic_add_fetch(&probe.hits, 1u, __ATOMIC_RELAXED) : 0;
++            if (probe.watch && hit == 1) {
++                HvProbe::watch_address.store(r[probe.dump_reg] + probe.dump_offset);
++                LOG_INFO(Core_ARM, "PROBE watch armed at {:#x}", HvProbe::watch_address.load());
++            }
++            if (hit && hit <= 20000) {
++                u64 words[2]{};
++                if (m_process->GetMemory().IsValidVirtualAddress(r[1])) {
++                    words[0] = m_process->GetMemory().Read64(r[1]);
++                    words[1] = m_process->GetMemory().Read64(r[1] + 8);
++                }
++                LOG_INFO(Core_ARM, "PROBE {}+{:#x} #{} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x6={:#x} x7={:#x} x8={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x} x23={:#x} lr={:#x} [x1]={:016x} {:016x}", probe.module, probe.offset, hit, r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],r[8],r[19],r[20],r[21],r[22],r[23],r[30],words[0],words[1]);
++                if (probe.dump_reg >= 0) {
++                    const u64 addr = r[probe.dump_reg] + probe.dump_offset;
++                    if (m_process->GetMemory().IsValidVirtualAddress(addr) &&
++                        m_process->GetMemory().IsValidVirtualAddress(addr + 15)) {
++                        LOG_INFO(Core_ARM, "PROBE dump {}+{:#x} #{} [x{}+{:#x}]={:016x} {:016x}",
++                                 probe.module, probe.offset, hit, probe.dump_reg, probe.dump_offset,
++                                 m_process->GetMemory().Read64(addr), m_process->GetMemory().Read64(addr + 8));
++                    }
++                }
++                if ((words[0] & 255) >= 32 && (words[0] & 255) <= 126) {
++                    std::string str;
++                    for (int i = 0; i < 160 && m_process->GetMemory().IsValidVirtualAddress(r[1] + i); i++) {
++                        const u8 ch = m_process->GetMemory().Read8(r[1] + i);
++                        if (!ch) break;
++                        if (ch < 32 || ch > 126) { str.clear(); break; }
++                        str.push_back(ch);
++                    }
++                    if (str.size() >= 3) LOG_INFO(Core_ARM, "PROBE text {}+{:#x} #{} x1={}", probe.module, probe.offset, hit, str);
++                }
++            }
++            if ((probe.instruction & 0xfffffc1f) == 0xd65f0000) {
++                m_ctx.pc = r[(probe.instruction >> 5) & 31];
++                return Resolution::Continue;
++            }
++            if (probe.instruction != 0xd503201f) {
++                const auto dst = probe.instruction & 31;
++                const auto src = (probe.instruction >> 16) & 31;
++                u64 value = src == 31 ? 0 : r[src];
++                if (!(probe.instruction >> 31)) value = static_cast<u32>(value);
++                if (dst != 31) hv_vcpu_set_reg(vcpu.id, static_cast<hv_reg_t>(HV_REG_X0 + dst), value);
++            }
++            m_ctx.pc = elr + 4;
++            return Resolution::Continue;
++        }
+         out = HaltReason::InstructionBreakpoint;
+         return Resolution::Return;
+     case EcUnknown:
+@@ -347,12 +402,23 @@ HaltReason ArmHypervisor::RunThread(Kernel::KThread* thread) {
+             vcpu.seen_code = code;
+             vcpu.force_flush = false;
+             hv_vcpu_set_sys_reg(id, HV_SYS_REG_ELR_EL1, m_ctx.pc);
+-            hv_vcpu_set_sys_reg(id, HV_SYS_REG_SPSR_EL1, (m_ctx.pstate & NzcvMask) | SpsrEl0Masked);
++            const bool watching = HvProbe::watch_address.load() && !HvProbe::watch_done.load();
++            hv_vcpu_set_sys_reg(id, HV_SYS_REG_SPSR_EL1, (m_ctx.pstate & NzcvMask) |
++                               (SpsrEl0Masked & ~(watching ? 0x200ULL : 0ULL)));
+             hv_vcpu_set_reg(id, HV_REG_CPSR, CpsrEl1hMasked);
+             hv_vcpu_set_reg(id, HV_REG_PC, flush ? Hv::Vm::EntryFlushVa : Hv::Vm::EntryPlainVa);
+         }
+         resume_as_is = false;
+ 
++        const u64 watched = HvProbe::watch_done.load() ? 0 : HvProbe::watch_address.load();
++        if (HvProbe::watch_address.load()) {
++            hv_vcpu_set_trap_debug_exceptions(id, watched != 0);
++            hv_vcpu_set_sys_reg(id, HV_SYS_REG_DBGWVR0_EL1, watched & ~7ULL);
++            hv_vcpu_set_sys_reg(id, HV_SYS_REG_DBGWCR0_EL1,
++                               watched ? (0x15ULL | (1ULL << (5 + (watched & 7)))) : 0);
++            hv_vcpu_set_sys_reg(id, HV_SYS_REG_MDSCR_EL1, watched ? (1ULL << 15) : 0);
++        }
++
+         const s64 run_start = m_stats_enabled ? NowNs() : 0;
+         const hv_return_t run_result = hv_vcpu_run(id);
+         if (m_stats_enabled) {
+@@ -397,6 +463,39 @@ HaltReason ArmHypervisor::RunThread(Kernel::KThread* thread) {
+         }
+ 
+         const u64 syndrome = exit.exception.syndrome;
++        if (ExceptionClass(syndrome) == EcBrk64 && HvProbe::watch_address.load()) {
++            u64 pc{}, cpsr{};
++            hv_vcpu_get_reg(id, HV_REG_PC, &pc);
++            hv_vcpu_get_reg(id, HV_REG_CPSR, &cpsr);
++            HaltReason halt{};
++            if (HandleLowerSync(vcpu, syndrome, 0, pc, cpsr, halt) == Resolution::Continue)
++                continue;
++            ReadState(vcpu);
++            return halt;
++        }
++        if (ExceptionClass(syndrome) == 0x34 && HvProbe::watch_address.load()) {
++            HvProbe::watch_done.store(true);
++            u64 regs[31]{}, pc{}, cpsr{};
++            hv_vcpu_get_reg(id, HV_REG_PC, &pc);
++            hv_vcpu_get_reg(id, HV_REG_CPSR, &cpsr);
++            for (u32 i = 0; i < 31; ++i)
++                hv_vcpu_get_reg(id, static_cast<hv_reg_t>(HV_REG_X0 + i), &regs[i]);
++            LOG_INFO(Core_ARM, "PROBE WATCH pc={:#x} far={:#x} instruction={:08x} lr={:#x}",
++                     pc, exit.exception.virtual_address, m_process->GetMemory().Read32(pc), regs[30]);
++            for (u32 i = 0; i < 31; ++i)
++                LOG_INFO(Core_ARM, "PROBE WATCH x{}={:#x}", i, regs[i]);
++            u64 fp = regs[29];
++            for (u32 i = 0; i < 16 && m_process->GetMemory().IsValidVirtualAddress(fp + 15); ++i) {
++                LOG_INFO(Core_ARM, "PROBE WATCH frame {} lr={:#x}", i,
++                         m_process->GetMemory().Read64(fp + 8));
++                const u64 next = m_process->GetMemory().Read64(fp);
++                if (next <= fp || next - fp > 0x100000) break;
++                fp = next;
++            }
++            m_ctx.pc = pc;
++            m_ctx.pstate = static_cast<u32>(cpsr & NzcvMask);
++            continue;
++        }
+         if (ExceptionClass(syndrome) != EcHvc64) {
+             LOG_CRITICAL(Core_ARM,
+                          "Hypervisor: exception to the host, syndrome {:#x}, va {:#x}, ipa {:#x}",
+diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
+index 7e3b9a5..c2f0975 100644
+--- a/src/core/loader/nso.cpp
++++ b/src/core/loader/nso.cpp
+@@ -25,6 +25,7 @@
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/loader/nso.h"
+ #include "core/memory.h"
++#include "core/arm/hypervisor/probe.h"
+ 
+ #ifdef HAS_NCE
+ #include "core/arm/nce/patcher.h"
+@@ -247,6 +248,7 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
+     }
+ 
+     // Load codeset for current process
++    Core::HvProbe::Install(nso_file.GetName(), load_base, codeset.memory);
+     LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
+     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
+     return load_base + image_size;
+diff --git a/src/video_core/renderer_vulkan/renderer_vulkan.cpp b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+index ec4a02a..8da7972 100644
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.cpp
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+@@ -7,6 +7,9 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstring>
++#include <cstdlib>
++#include <fstream>
++#include <filesystem>
+ #include <memory>
+ #include <optional>
+ #include <string>
+@@ -297,6 +300,20 @@ vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConf
+ }
+ 
+ void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> framebuffers) {
++    // Optional diagnostic capture of composited output, before presentation.
++    static const char* dump_dir = std::getenv("EDEN_NX2_FRAME_DUMP");
++    static u64 frame_number{};
++    if (dump_dir && ++frame_number % 120 == 0) {
++        const auto& layout = render_window.GetFramebufferLayout();
++        const auto buffer = RenderToBuffer(framebuffers, layout, VK_FORMAT_R8G8B8A8_UNORM,
++                                          layout.width * layout.height * 4);
++        std::filesystem::create_directories(dump_dir);
++        std::ofstream file(fmt::format("{}/frame-{:06}.ppm", dump_dir, frame_number), std::ios::binary);
++        file << "P6\n" << layout.width << ' ' << layout.height << "\n255\n";
++        const auto pixels = buffer.Mapped();
++        for (size_t i = 0; i < pixels.size(); i += 4)
++            file.write(reinterpret_cast<const char*>(pixels.data() + i), 3);
++    }
+     if (!renderer_settings.screenshot_requested) {
+         return;
+     }
+diff --git a/src/video_core/shader_environment.cpp b/src/video_core/shader_environment.cpp
+index 4ab7189..e80a0ac 100644
+--- a/src/video_core/shader_environment.cpp
++++ b/src/video_core/shader_environment.cpp
+@@ -16,6 +16,7 @@
+ #include <memory>
+ #include <optional>
+ #include <utility>
++#include <nlohmann/json.hpp>
+ 
+ #include "common/assert.h"
+ #include "common/cityhash.h"
+@@ -232,6 +233,29 @@ void GenericEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {
+ }
+ 
+ void GenericEnvironment::Serialize(std::ofstream& file) const {
++    if (const char* folder = std::getenv("EDEN_NX2_FACT_DUMP"); folder && lowered_native) {
++        nlohmann::json facts;
++        facts["native_key"] = fmt::format("{:016x}", lowered_native->native_key);
++        facts["local"] = workgroup_size;
++        facts["shared"] = shared_memory_size;
++        facts["local_memory"] = local_memory_size;
++        facts["texture_buffer"] = texture_bound;
++        facts["viewport"] = viewport_transform_state;
++        facts["cbuf"] = nlohmann::json::object();
++        facts["textures"] = nlohmann::json::object();
++        for (const auto& [key, value] : cbuf_values)
++            facts["cbuf"][fmt::format("{}:{}", key >> 32, key & 0xffffffff)] = value;
++        for (const auto& [key, value] : texture_types)
++            facts["textures"][std::to_string(key)]["type"] = static_cast<u32>(value);
++        for (const auto& [key, value] : texture_pixel_formats) {
++            auto& texture = facts["textures"][std::to_string(key)];
++            texture["format"] = static_cast<u32>(value);
++            texture["integer"] = VideoCore::Surface::IsPixelFormatInteger(static_cast<VideoCore::Surface::PixelFormat>(value)) ? 1 : 0;
++        }
++        std::filesystem::create_directories(folder);
++        const auto path = std::filesystem::path(folder) / fmt::format("{:016x}-{:016x}.json", lowered_native->native_key, CalculateHash());
++        std::ofstream(path) << facts.dump(2);
++    }
+     const u64 code_size{static_cast<u64>(CachedSizeBytes())};
+     const u64 num_texture_types{static_cast<u64>(texture_types.size())};
+     const u64 num_texture_pixel_formats{static_cast<u64>(texture_pixel_formats.size())};
+@@ -527,6 +551,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
+             words[1], words[2], words[3]);
+     }
+     auto result = std::make_shared<LoweredNativeCode>();
++    result->native_key = Shader::Ampere::NativeProgramKey(native);
+     result->texture_bound = lowered.required_texture_buffer;
+     result->source_size = native_header_size + lowered.source_size;
+     auto& lowered_code = result->code;
+@@ -575,6 +600,19 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
+             }
+         }
+         InitializeNativeCode(std::move(lowered_native_));
++        if (const char* folder = std::getenv("EDEN_NX2_CBUF_DUMP"); folder && lowered_native) {
++            const u32 native_stage = program == Maxwell::ShaderType::Pixel ? 4 : 0;
++            const auto& cb = maxwell3d->state.shader_stages[native_stage].const_buffers[1];
++            if (cb.enabled && cb.size && cb.size <= 65536) {
++                std::filesystem::create_directories(folder);
++                const auto path = std::filesystem::path(folder) /
++                    fmt::format("{:016x}-c1.bin", lowered_native->native_key);
++                std::vector<u8> bytes(cb.size);
++                gpu_memory->ReadBlock(cb.address, bytes.data(), bytes.size());
++                std::ofstream output(path, std::ios::binary);
++                output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
++            }
++        }
+     }
+     gp_passthrough_mask = maxwell3d->regs.post_vtg_shader_attrib_skip_mask;
+     switch (program) {
+@@ -784,6 +822,27 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
+         is_proprietary_driver = true;
+         InitializeNativeCode(std::move(lowered_native_), 0, true);
+         start_address = sizeof(sph);
++        if (const char* folder = std::getenv("EDEN_NX2_CBUF_DUMP"); folder && lowered_native) {
++            std::filesystem::create_directories(folder);
++            const auto base = std::filesystem::path(folder) /
++                fmt::format("{:016x}", lowered_native->native_key);
++            if (!std::filesystem::exists(base.string() + ".json")) {
++                nlohmann::json state;
++                state["local"] = workgroup_size;
++                state["buffers"] = nlohmann::json::array();
++                for (size_t i = 0; i < qmd.const_buffer_config.size(); ++i) {
++                    if (!(qmd.const_buffer_enable_mask.Value() & (1U << i))) continue;
++                    const auto& cb = qmd.const_buffer_config[i];
++                    state["buffers"].push_back({{"slot", i}, {"address", cb.Address()}, {"size", cb.size.Value()}});
++                    const size_t size = std::min<size_t>(cb.size, 65536);
++                    std::vector<u8> bytes(size);
++                    gpu_memory->ReadBlockUnsafe(cb.Address(), bytes.data(), size);
++                    std::ofstream output(base.string() + fmt::format("-c{}.bin", i), std::ios::binary);
++                    output.write(reinterpret_cast<const char*>(bytes.data()), size);
++                }
++                std::ofstream(base.string() + ".json") << state.dump(2);
++            }
++        }
+     }
+ }
+ 
+diff --git a/src/video_core/shader_environment.h b/src/video_core/shader_environment.h
+index 7fa0b6f..7bd070b 100644
+--- a/src/video_core/shader_environment.h
++++ b/src/video_core/shader_environment.h
+@@ -33,6 +33,7 @@ namespace VideoCommon {
+ /// A native (Switch 2) program after capture and lowering to Maxwell code. The shader cache keeps
+ /// it so the environments built for the program's pipelines don't capture and lower it again.
+ struct LoweredNativeCode {
++    u64 native_key{};
+     /// Shader header, lowered instructions with Maxwell scheduling words, then the native
+     /// address map (what the environment's `code` used to be filled with).
+     std::vector<u64> code;
+diff --git a/src/yuzu_cmd/emu_window/emu_window_sdl3.cpp b/src/yuzu_cmd/emu_window/emu_window_sdl3.cpp
+index ecb8171..b93b324 100644
+--- a/src/yuzu_cmd/emu_window/emu_window_sdl3.cpp
++++ b/src/yuzu_cmd/emu_window/emu_window_sdl3.cpp
+@@ -36,10 +36,10 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
+         exit(1);
+     }
+     titlebar_timer = SDL_AddTimer(2000, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
+-        auto* this_ = (EmuWindow_SDL3*)userdata;
+-        auto const results = this_->system.GetAndResetPerfStats();
+-        auto const title = fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f);
+-        SDL_SetWindowTitle(this_->render_window, title.c_str());
++        SDL_Event event{};
++        event.type = SDL_EVENT_USER;
++        event.user.data1 = userdata;
++        SDL_PushEvent(&event);
+         return 2000;
+     }, this);
+     mouse_timer = SDL_AddTimer(100, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
+@@ -216,6 +216,14 @@ void EmuWindow_SDL3::OnEvent(SDL_Event& event) {
+     // Afterall we don't really expect the user to pay attention to the titlebar
+     // while they're moving a lot of shit around...
+     switch (event.type) {
++    case SDL_EVENT_USER:
++        if (event.user.data1 == this) {
++            const auto results = system.GetAndResetPerfStats();
++            const auto title = fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f);
++            // AppKit window mutations must run on SDL's event thread.
++            SDL_SetWindowTitle(render_window, title.c_str());
++        }
++        return;
+     case SDL_EVENT_WINDOW_RESIZED:
+     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+     case SDL_EVENT_WINDOW_MAXIMIZED:
+diff --git a/src/yuzu_cmd/emu_window/emu_window_sdl3_vk.cpp b/src/yuzu_cmd/emu_window/emu_window_sdl3_vk.cpp
+index afbe677..ef9081a 100644
+--- a/src/yuzu_cmd/emu_window/emu_window_sdl3_vk.cpp
++++ b/src/yuzu_cmd/emu_window/emu_window_sdl3_vk.cpp
+@@ -73,7 +73,12 @@ EmuWindow_SDL3_VK::EmuWindow_SDL3_VK(InputCommon::InputSubsystem* input_subsyste
+     } else if (SDL_GetPointerProperty(window_props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
+                                       nullptr) != nullptr) {
+         window_info.type = Core::Frontend::WindowSystemType::Cocoa;
+-        window_info.render_surface = SDL_Metal_CreateView(render_window);
++        metal_view = SDL_Metal_CreateView(render_window);
++        window_info.render_surface = metal_view ? SDL_Metal_GetLayer(metal_view) : nullptr;
++        if (!window_info.render_surface) {
++            LOG_CRITICAL(Frontend, "Unable to create the SDL Metal layer: {}", SDL_GetError());
++            std::exit(EXIT_FAILURE);
++        }
+     } else if (void* android_window =
+                    SDL_GetPointerProperty(window_props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER,
+                                           nullptr);
+@@ -92,7 +97,11 @@ EmuWindow_SDL3_VK::EmuWindow_SDL3_VK(InputCommon::InputSubsystem* input_subsyste
+              Common::g_scm_branch, Common::g_scm_desc);
+ }
+ 
+-EmuWindow_SDL3_VK::~EmuWindow_SDL3_VK() = default;
++EmuWindow_SDL3_VK::~EmuWindow_SDL3_VK() {
++    if (metal_view) {
++        SDL_Metal_DestroyView(metal_view);
++    }
++}
+ 
+ std::unique_ptr<Core::Frontend::GraphicsContext> EmuWindow_SDL3_VK::CreateSharedContext() const {
+     return std::make_unique<DummyContext>();
+diff --git a/src/yuzu_cmd/emu_window/emu_window_sdl3_vk.h b/src/yuzu_cmd/emu_window/emu_window_sdl3_vk.h
+index 5eb2626..b8e439f 100644
+--- a/src/yuzu_cmd/emu_window/emu_window_sdl3_vk.h
++++ b/src/yuzu_cmd/emu_window/emu_window_sdl3_vk.h
+@@ -26,4 +26,7 @@ public:
+     ~EmuWindow_SDL3_VK() override;
+ 
+     std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override;
++
++private:
++    void* metal_view{};
+ };
+diff --git a/src/core/arm/hypervisor/probe.h b/src/core/arm/hypervisor/probe.h
+new file mode 100644
+index 0000000..4f769ca
+--- /dev/null
++++ b/src/core/arm/hypervisor/probe.h
+@@ -0,0 +1,69 @@
++// Local diagnostic probes. Only explicitly requested MOV-register/NOP sites are accepted.
++#pragma once
++#include <cstdlib>
++#include <atomic>
++#include <cstring>
++#include <string>
++#include <vector>
++#include "common/common_types.h"
++
++namespace Core::HvProbe {
++struct Probe {
++    u64 address;
++    u64 offset;
++    u32 instruction;
++    std::string module;
++    u32 hits{};
++    int dump_reg{-1};
++    u64 dump_offset{};
++    bool watch{};
++    int filter_reg{-1};
++    u64 filter_offset{};
++    u64 filter_value{};
++};
++inline std::vector<Probe> probes;
++inline std::atomic<u64> watch_address{};
++inline std::atomic<bool> watch_done{};
++inline void Install(const std::string& name, u64 base, std::vector<u8>& image) {
++    const char* spec = std::getenv("EDEN_NX2_PROBE");
++    if (!spec) return;
++    std::string s(spec);
++    size_t at = 0;
++    while (at < s.size()) {
++        const size_t end = s.find(',', at);
++        const std::string item = s.substr(at, end == std::string::npos ? end : end - at);
++        const size_t sep = item.find(':');
++        if (sep != std::string::npos && item.substr(0, sep) == name) {
++            const u64 offset = std::strtoull(item.c_str() + sep + 1, nullptr, 16);
++            if (offset + 4 > image.size() || offset % 4) std::abort();
++            u32 word;
++            std::memcpy(&word, image.data() + offset, 4);
++            if (word != 0xd503201f && (word & 0x7fe0ffe0) != 0x2a0003e0 &&
++                (word & 0xfffffc1f) != 0xd65f0000) std::abort();
++            Probe probe{base + offset, offset, word, name, 0};
++            const size_t dump_at = item.find("@x");
++            if (dump_at != std::string::npos) {
++                char* after = nullptr;
++                probe.dump_reg = std::strtol(item.c_str() + dump_at + 2, &after, 10);
++                if (probe.dump_reg < 0 || probe.dump_reg > 30 || *after != '+') std::abort();
++                probe.dump_offset = std::strtoull(after + 1, nullptr, 16);
++                probe.watch = item.ends_with('!');
++            }
++            const size_t filter_at = item.find("?x");
++            if (filter_at != std::string::npos) {
++                char* after = nullptr;
++                probe.filter_reg = std::strtol(item.c_str() + filter_at + 2, &after, 10);
++                if (probe.filter_reg < 0 || probe.filter_reg > 30 || *after != '+') std::abort();
++                probe.filter_offset = std::strtoull(after + 1, &after, 16);
++                if (*after != '=') std::abort();
++                probe.filter_value = std::strtoull(after + 1, nullptr, 16);
++            }
++            probes.push_back(probe);
++            const u32 brk = 0xd43e0000;
++            std::memcpy(image.data() + offset, &brk, 4);
++        }
++        if (end == std::string::npos) break;
++        at = end + 1;
++    }
++}
++} // namespace Core::HvProbe

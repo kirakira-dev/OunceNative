@@ -1,0 +1,32 @@
+# Pokopia v327680, SDK 20.5.25. See docs/pokopia.md for tested coverage.
+title_id	0400A3A01EE4C000
+program_id	0400A3A01EE4C000
+platform	nx2
+device_api	231.30
+tick_hz	31250000
+name	Pokemon Pokopia (development)
+ipa	Pokopia.ipa
+app_category	public.app-category.action-games
+package	v327680
+shader_versions	v327680
+modules	main subsdk0 sdk
+romfs_marker	motor_asset_re/KIDS_PLATFORM_OUNCE/root.rdb
+zip_store	.fdata:.webm:.metallib
+mem_reserve	0x800000000
+mem_alias	0x500000000
+mem_stack	0x10000000
+app_pool	0x265100000
+# PokeDinner's default logical save capacities when control metadata is absent.
+save_data_size	0xf0000000
+save_journal_size	0xf0000000
+tex_flush_upload	on
+nvn_tex_base	0x20
+nvn_tex_slots	32
+nvn_samp_base	0x568
+nvn_img_base	0x120
+nvn_img_slots	8
+nvn_ssbo_bases	vs=0x110 ps=0x510 gs=0x410 hs=0x210 ds=0x310 cs=0x310
+shader_groups	/motor_asset_re/=motor
+shader_note	Pokopia NX2: tutorial and first outdoor area tested; geometry coverage incomplete
+build	v327680	unknown	main=816c5358e8178d802fcec4a7ce5a741a	subsdk0=9646a69cb1024ba919fddaa4265e6bc5	sdk=cc7da00d672399efe7958790d17fae39
+shader_nx2_chain	800d2d70e030797ce9757d052a32dc79d79852b81b8b41cd5df92b656b9830ec
