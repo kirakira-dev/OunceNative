@@ -27,6 +27,9 @@ cp -c -R "$MSL" "$R/shaders/b-$CHAIN"            # -c: APFS clone
 cp "$W/build/font/nintendo_ext.ttf" "$R/font/"
 echo "cloning the RomFS ($(du -sh "$ROMFS" | cut -f1))"
 cp -c -R "$ROMFS" "$R/RomFS"
+if [ "$GAME" = 0400380020056000 ]; then
+    python3 "$REPO/dm/tools/raiders_resolution.py" "$ROMFS" "$R/scene-resolution"
+fi
 
 ICON=$(ls "$W/data/$VER/icon.jpg" "$W/data/v0/icon.jpg" 2>/dev/null | head -1 || true)
 if [ -n "$ICON" ]; then
@@ -63,6 +66,8 @@ environment = {
     'DM_WINDOW': '1',
     'DM_AUDIO': '1',
 }
+if profile_id == '0400380020056000':
+    environment['DM_SCENE_OVERLAY_ROOT'] = '${RESOURCES}/scene-resolution'
 info = {
     'CFBundleExecutable': 'dmhost',
     'CFBundleIdentifier': 'org.ouncenative.mac.' + profile_id.lower(),

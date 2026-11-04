@@ -78,6 +78,11 @@ static int present_scale_matches(NvPresentScale *s, const NSUInteger size[4]) {
     return s && s->input.width == size[0] && s->input.height == size[1] &&
         s->output.width == size[2] && s->output.height == size[3];
 }
+static int present_scale_direct(id<MTLTexture> dst, id<MTLFXSpatialScalerBase> fx, const NSUInteger size[4]) {
+    return dst.pixelFormat == MTLPixelFormatBGRA8Unorm && dst.storageMode == MTLStorageModePrivate &&
+        dst.textureType == MTLTextureType2D && dst.sampleCount == 1 && dst.width == size[2] && dst.height == size[3] &&
+        (dst.usage & fx.outputTextureUsage) == fx.outputTextureUsage;
+}
 #endif
 
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
@@ -89,11 +94,13 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
         if (!present_scale_matches(cached, size)) cached = present_scale_make(size, 0);
         NvPresentScale *s = cached;
         if (s && present_blit(cb, src, s->input, crop, flip)) {
+            int direct = present_scale_direct(dst, s->fx3, size);
+            s->fx3.outputTexture = direct ? dst : s->output;
             [s->fx3 encodeToCommandBuffer:cb];
             // Screenshots may finish asynchronously after a resize replaces the
             // cache. Keep this scaler and its textures through GPU completion.
             [cb addCompletedHandler:^(id<MTLCommandBuffer> done) { (void)done; (void)s; }];
-            return present_blit(cb, s->output, dst, NULL, 0);
+            return direct || present_blit(cb, s->output, dst, NULL, 0);
         }
     }
 #endif
@@ -113,8 +120,10 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
         if (s) {
             [cb useResidencySet:s->residency];
             if (present_blit_m4(cb, src, s->input, crop, uv_i, flip)) {
+                int direct = present_scale_direct(dst, s->fx4, size);
+                s->fx4.outputTexture = direct ? dst : s->output;
                 [s->fx4 encodeToCommandBuffer:cb];
-                return present_blit_m4(cb, s->output, dst, NULL, uv_i + 3, 0);
+                return direct || present_blit_m4(cb, s->output, dst, NULL, uv_i + 3, 0);
             }
         }
     }

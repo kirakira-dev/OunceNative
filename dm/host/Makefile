@@ -14,7 +14,7 @@ $(error no game profile $(GAME) (neither in dm/games nor in DM_GAMES_DIR))
 endif
 endif
 GAME_H = gen/$(GAME)/game_profile.h
-CFLAGS=-O1 -g -Wall -Wno-unused-function
+CFLAGS=$(if $(filter 0400380020056000,$(GAME)),-O2,-O1) -g -Wall -Wno-unused-function
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
 SRC=main.c loader.c hle.c host_stubs.c crash.c probe.c thread.c memstat.m ../ios/Sources/dm_touch_controls.c $(sort $(wildcard hle_*.c)) front_mac.m settings_mac.m entry.S dm_i18n.c dm_motion.c
 # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)

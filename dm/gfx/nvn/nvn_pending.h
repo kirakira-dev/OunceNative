@@ -44,3 +44,13 @@ static inline int nvn_pending_hits(const nvn_pending *p, uint64_t a, uint64_t n)
         if (p->ranges[mid].hi <= a) lo = mid + 1; else hi = mid; }
     return lo < p->count && p->ranges[lo].lo < a + n;
 }
+
+// Only an exact range can prove coverage; the conservative 'all' state cannot.
+static inline int nvn_pending_covers(const nvn_pending *p, uint64_t a, uint64_t n) {
+    if (!n) return 1;
+    if (p->all || n > UINT64_MAX - a) return 0;
+    size_t lo = 0, hi = p->count;
+    while (lo < hi) { size_t mid = lo + (hi - lo) / 2;
+        if (p->ranges[mid].hi <= a) lo = mid + 1; else hi = mid; }
+    return lo < p->count && p->ranges[lo].lo <= a && a + n <= p->ranges[lo].hi;
+}

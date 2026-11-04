@@ -46,6 +46,8 @@ t_present_crop: t_present_crop.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_crop.m ../../host/crash.c ../../host/hle_bigstack.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 t_present_scale: t_present_scale.m ../../host/crash.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_scale.m ../../host/crash.c $(filter-out ../nvn/nvn_mtl.m ../nvn/nvn_entry.S ../nvn/nvn_thunks.S,$(GFX)) $(FW)
+t_game_scale: t_game_scale.m ../../host/crash.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_game_scale.m ../../host/crash.c $(filter-out ../nvn/nvn_mtl.m ../nvn/nvn_entry.S ../nvn/nvn_thunks.S,$(GFX)) $(FW)
 t_raytrace: t_raytrace.m ../nvn/nvn_raytrace.m ../nvn/nvn_raytrace_source.m ../nvn/nvn_raytrace.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_raytrace.m ../nvn/nvn_raytrace.m ../nvn/nvn_raytrace_source.m -framework Metal -framework Foundation
 t_reorder_chain: t_reorder_chain.m ../../host/crash.c $(GFX) $(GFX_H)

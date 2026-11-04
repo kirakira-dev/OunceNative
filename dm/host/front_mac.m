@@ -57,6 +57,17 @@ void front_configure_app(int *argc, char ***argv) {
                 if (setenv(key.UTF8String, value.UTF8String, 1)) die("[RED] cannot set native app preference");
             }
         }
+        const char *scene = getenv("DM_SCENE_HEIGHT"), *overlays = getenv("DM_SCENE_OVERLAY_ROOT");
+        if (DM_GAME_PROGRAM_ID == 0x0400380020056000ull && scene && overlays &&
+            (!strcmp(scene, "720") || !strcmp(scene, "900"))) {
+            NSString *path = [@(overlays) stringByAppendingPathComponent:@(scene)];
+            if ([NSFileManager.defaultManager fileExistsAtPath:[path stringByAppendingPathComponent:@"Gyml/Default.game__gfx__parameter__ModuleParam.bgyml"]]) {
+                const char *existing = getenv("DM_ROMFS_OVERLAY");
+                NSString *roots = existing && *existing ? [NSString stringWithFormat:@"%s:%@", existing, path] : path;
+                setenv("DM_ROMFS_OVERLAY", roots.UTF8String, 1);
+                LOG("Raiders handheld scene height %s; HUD 1080", scene);
+            } else LOG("[RED] scene resolution overlay is missing: %s", path.fileSystemRepresentation);
+        }
         if (*argc != 1) return;
         for (NSString *key in @[@"DM_ROOT", @"DM_SAVE", @"DM_TEMP", @"DM_SETTINGS_DIR"]) {
             const char *value = getenv(key.UTF8String);
@@ -95,9 +106,15 @@ static CAMetalLayer *g_layer;
     CAMetalLayer *layer = (CAMetalLayer *)self.layer;
     NSSize pixels = [self convertSizeToBacking:self.bounds.size];
     if (pixels.width < 1 || pixels.height < 1) return;
+    const char *output = getenv("DM_OUTPUT_RES");
+    if (output && !strcmp(output, "3840x2160")) pixels = NSMakeSize(3840, 2160);
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     layer.contentsScale = self.window.backingScaleFactor ?: 1;
-    layer.drawableSize = CGSizeMake(round(pixels.width), round(pixels.height));
+    CGSize size = CGSizeMake(round(pixels.width), round(pixels.height));
+    if (!CGSizeEqualToSize(layer.drawableSize, size)) {
+        layer.drawableSize = size;
+        LOG("presentation output %.0fx%.0f pixels", size.width, size.height);
+    }
     [CATransaction commit];
 }
 - (void)setFrameSize:(NSSize)size { [super setFrameSize:size]; [self updateDrawableSize]; }
@@ -258,6 +275,7 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        g_layer.framebufferOnly = NO;   // MetalFX can write the drawable directly, including its reconstruction reads.
         g_layer.contentsScale = win.backingScaleFactor;
         v.layer = g_layer;
         [v updateDrawableSize];

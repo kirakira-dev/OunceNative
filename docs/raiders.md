@@ -6,7 +6,13 @@ The tested route covers native boot, menus, character creation, save reload, the
 
 The renderer fixes the opening scene's black output, swapped half-texture components, missing player skin, and command-list corruption. A later black-frame failure was traced to a full conditional-render table: dropped timestamp reports let repeated clears erase the scene. Dynamic report tracking fixes that reproduced failure. Other terrain differences and later areas still need checking against console output. Audio produces nonzero output, but listening and synchronization checks remain incomplete.
 
-Handheld remains the default. In docked mode, the observed main scene renders at 2560 x 1440 and the game outputs 3840 x 2160, but the island route still has severe stalls. The tested M4 does not sustain 60 FPS. See [rendering and performance](performance.md) for measured changes and limits.
+Handheld remains the default. The app can present at 3840 x 2160 with MetalFX upscaling and a selectable handheld scene resolution. The latest 720p-scene island test is about 34 FPS with AC Low Power Mode enabled on the tested M4; 60 FPS remains unachieved. See [rendering and performance](performance.md) for measured changes and limits.
+
+## Resolution
+
+Open Settings (Command-comma) → General. **Output resolution** selects the window/display size or a fixed 4K drawable. **Handheld scene** selects 1080p (original), 900p, or 720p (faster); the HUD remains 1080p before final presentation scaling. Both settings apply after restarting. This provides upscaled 4K output, not native 4K scene rendering. The scene setting applies only in handheld mode.
+
+The equivalent environment settings are `DM_OUTPUT_RES=3840x2160`, `DM_SCENE_HEIGHT=720`, `DM_OPMODE=0`, and `DM_UPSCALER=metalfx`. The bundled overlays are generated locally from the owner's dump and do not modify it. Optional `DM_GAME_UPSCALER=metalfx` also replaces the identified game's spatial reconstruction filter in compatible dispatches; it uses MetalFX rather than matching that neural filter pixel for pixel.
 
 ## Controls
 
@@ -116,4 +122,4 @@ GAME="$DM_GAME" W="$RAIDERS_WORK" APP_NAME="Splatoon Raiders" \
   scripts/build_mac_app.sh "$RAIDERS_DUMP/Splatoon Raiders.app"
 ```
 
-The bundle includes locally rewritten modules and compiled shaders. Its saves and settings live under `~/Library/Application Support/Splatoon Raiders`. The profile defaults to handheld resolution. `DM_OPMODE=1` in that folder's `env.txt` selects docked resolution; `DM_OPMODE=0` restores handheld resolution. The same choice is available in the app's settings.
+The bundle includes locally rewritten modules and compiled shaders. Packaging Raiders also requires the Python `byml` package to generate the optional 720p/900p scene overlays. Its saves and settings live under `~/Library/Application Support/Splatoon Raiders`. The profile defaults to handheld resolution. `DM_OPMODE=1` in that folder's `env.txt` selects docked resolution; `DM_OPMODE=0` restores handheld resolution. The same choice is available in the app's settings.

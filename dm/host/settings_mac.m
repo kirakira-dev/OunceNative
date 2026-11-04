@@ -93,7 +93,7 @@ static NSString *const k_lang_name[] = {@"English (US)", @"English (UK)", @"Japa
 @property(strong) NSWindow *win;
 @property(strong) NSMutableArray<NSButton *> *bindButtons;   // indexed by action
 @property(strong) NSTextField *padLabel, *restartNote;
-@property(strong) NSPopUpButton *modePop, *langPop, *padPop;
+@property(strong) NSPopUpButton *modePop, *langPop, *padPop, *outputPop, *scalePop;
 @property(strong) NSButton *soundBox, *musicBox, *fullBox, *rayBox;
 @property(assign) int capturing;   // action waiting for a key, -1 none
 @property(strong) id monitor;
@@ -170,6 +170,18 @@ static NSTextField *label(NSString *s, NSRect r) {
     [_modePop addItemsWithTitles:@[@"Docked (higher resolution)", @"Handheld (higher frame rate)"]];
     _modePop.target = self; _modePop.action = @selector(envChanged:); [v addSubview:_modePop];
     y -= 40;
+    [v addSubview:label(@"Output resolution:", NSMakeRect(12, y + 4, 124, 18))];
+    _outputPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(140, y, 280, 26) pullsDown:NO];
+    [_outputPop addItemsWithTitles:@[@"Match window / display", @"4K (3840 × 2160)"]];
+    _outputPop.target = self; _outputPop.action = @selector(envChanged:); [v addSubview:_outputPop];
+    if (DM_GAME_PROGRAM_ID == 0x0400380020056000ull) {
+        y -= 40;
+        [v addSubview:label(@"Handheld scene:", NSMakeRect(12, y + 4, 124, 18))];
+        _scalePop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(140, y, 280, 26) pullsDown:NO];
+        [_scalePop addItemsWithTitles:@[@"1080p (original)", @"900p", @"720p (faster)"]];
+        _scalePop.target = self; _scalePop.action = @selector(envChanged:); [v addSubview:_scalePop];
+    }
+    y -= 40;
     [v addSubview:label(@"Game language:", NSMakeRect(12, y + 4, 120, 18))];
     _langPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(140, y, 280, 26) pullsDown:NO];
     for (int i = 0; i < NLANG; i++) [_langPop addItemWithTitle:k_lang_name[i]];
@@ -208,6 +220,9 @@ static NSTextField *label(NSString *s, NSRect r) {
     for (int i = 0; i < DMSET_N; i++) _bindButtons[i].title = i == _capturing ? @"Press a key…" : key_name(g_dmset_bind[i]);
     [_padPop selectItemAtIndex:g_dmset_pad_by_label ? 1 : 0];
     [_modePop selectItemAtIndex:[env_get(@"DM_OPMODE", DM_GAME_OPMODE ? @"1" : @"0") intValue] == 0 ? 1 : 0];
+    [_outputPop selectItemAtIndex:[env_get(@"DM_OUTPUT_RES", @"display") isEqualToString:@"3840x2160"] ? 1 : 0];
+    NSString *scene = env_get(@"DM_SCENE_HEIGHT", @"1080");
+    [_scalePop selectItemAtIndex:[scene isEqualToString:@"720"] ? 2 : [scene isEqualToString:@"900"] ? 1 : 0];
     NSString *lang = env_get(@"DM_LANG", @"en-US"); NSInteger li = 0;
     for (int i = 0; i < NLANG; i++) if ([k_lang_code[i] caseInsensitiveCompare:lang] == NSOrderedSame) li = i;
     [_langPop selectItemAtIndex:li];
@@ -253,6 +268,8 @@ static NSTextField *label(NSString *s, NSRect r) {
 - (void)envChanged:(id)s {
     (void)s;
     env_set(@"DM_OPMODE", _modePop.indexOfSelectedItem == 1 ? @"0" : @"1");
+    env_set(@"DM_OUTPUT_RES", _outputPop.indexOfSelectedItem == 1 ? @"3840x2160" : @"display");
+    if (_scalePop) env_set(@"DM_SCENE_HEIGHT", _scalePop.indexOfSelectedItem == 2 ? @"720" : _scalePop.indexOfSelectedItem == 1 ? @"900" : @"1080");
     env_set(@"DM_LANG", k_lang_code[_langPop.indexOfSelectedItem]);
     env_set(@"DM_AUDIO", _soundBox.state == NSControlStateValueOn ? @"1" : @"0");
     if(_rayBox)env_set(@"DM_RAYTRACE",_rayBox.state==NSControlStateValueOn?@"ao":@"off");

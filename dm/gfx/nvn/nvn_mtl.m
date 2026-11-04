@@ -717,15 +717,21 @@ static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
 // passes and the CPU see them as before. The pass still ends before a draw that would need more: a binding the deferred updates cover only in part, or a read of the deferred data through a vertex,
 // index, indirect or storage buffer (ubd_conflict). Off in TBDR mode (it reorders passes). DM_NVN_UB_DEFER=0 turns it off
 static size_t arena_alloc(size_t n, id<MTLBuffer> *buf); static inline void args_dirty_all(void);
-typedef struct { uint64_t lo, hi, gpu; size_t off; __unsafe_unretained id<MTLBuffer> buf; } ubd_ent;   // data at buf + off (the ubs ring; a ring block replaced meanwhile lives until this submission completes)
+typedef struct { uint64_t lo, hi, gpu; size_t off; __unsafe_unretained id<MTLBuffer> buf; const uint8_t *data; } ubd_ent;   // data at buf + off (the ubs ring; a ring block replaced meanwhile lives until this submission completes)
 enum { UBD_MAX = 512 };
 static ubd_ent g_ubd[UBD_MAX]; static int g_nubd;
+static nvn_pending g_ubd_ranges;
 static uint64_t g_ubd_deferred, g_ubd_conflicts;   // updates deferred, passes ended before a draw that needed more (the residency set line)
 static int ubd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_DEFER"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UB_DEFER=0: uniform updates inside a pass end the pass as before"); } return v && !tbdr_on(); }
 void mtl_ubd_stats(uint64_t *deferred, uint64_t *conflicts) { *deferred = g_ubd_deferred; *conflicts = g_ubd_conflicts; }
-static int ubd_hits(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_nubd; i++) if (lo < g_ubd[i].hi && g_ubd[i].lo < hi) return 1; return 0; }
+static int ubd_hits(uint64_t lo, uint64_t hi) {
+    if (!g_ubd_ranges.all) return nvn_pending_hits(&g_ubd_ranges, lo, hi - lo);
+    for (int i = 0; i < g_nubd; i++) if (lo < g_ubd[i].hi && g_ubd[i].lo < hi) return 1;
+    return 0;
+}
 // Whether the deferred updates cover [lo, hi) entirely (any order of overlap): the union of their ranges clipped to it, swept from lo
 static int ubd_covers(uint64_t lo, uint64_t hi) {
+    if (!g_ubd_ranges.all) return nvn_pending_covers(&g_ubd_ranges, lo, hi - lo);
     for (uint64_t at = lo; at < hi;) { uint64_t next = at;
         for (int i = g_nubd - 1; i >= 0; i--) if (g_ubd[i].lo <= at && g_ubd[i].hi > next) {
             next = g_ubd[i].hi; if (next >= hi) return 1;
@@ -755,7 +761,7 @@ static void ubd_snapshot(uint64_t lo, uint64_t hi, id<MTLBuffer> *buffer, size_t
     id<MTLBuffer> ab; size_t o = arena_alloc((size_t)(hi - lo), &ab); uint8_t *d = (uint8_t *)ab.contents + o;
     memset(d, 0, (size_t)(hi - lo)); // Sparse footprints leave only unread bytes empty.
     for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < hi ? e->hi : hi;
-        if (a < b) memcpy(d + (a - lo), (const uint8_t *)e->buf.contents + e->off + (a - e->lo), (size_t)(b - a)); }
+        if (a < b) memcpy(d + (a - lo), e->data + (a - e->lo), (size_t)(b - a)); }
     *buffer = ab; *offset = o;
 }
 static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {
@@ -764,21 +770,19 @@ static uint64_t ubd_shadow(uint64_t lo, uint64_t hi) {
 }
 // Draws have their own snapshots. Only the final bytes need copying back.
 static void ubd_flush(void) {
-    static nvn_pending ranges;
-    nvn_pending_clear(&ranges);
-    for (int i = 0; i < g_nubd; i++) nvn_pending_add(&ranges, g_ubd[i].lo, g_ubd[i].hi - g_ubd[i].lo);
     ubd_ent copies[UBD_MAX]; int n = g_nubd;
-    if (ranges.all) memcpy(copies, g_ubd, n * sizeof *copies);
+    if (g_ubd_ranges.all) memcpy(copies, g_ubd, n * sizeof *copies);
     else {
-        n = (int)ranges.count;
+        n = (int)g_ubd_ranges.count;
         for (int i = 0; i < n; i++) {
             id<MTLBuffer> buffer; size_t offset;
-            uint64_t lo = ranges.ranges[i].lo, hi = ranges.ranges[i].hi;
+            uint64_t lo = g_ubd_ranges.ranges[i].lo, hi = g_ubd_ranges.ranges[i].hi;
             ubd_snapshot(lo, hi, &buffer, &offset);
             copies[i] = (ubd_ent){.lo = lo, .hi = hi, .buf = buffer, .off = offset};
         }
     }
     g_nubd = 0;
+    nvn_pending_clear(&g_ubd_ranges);
     for (int i = 0; i < n; i++) { const ubd_ent *e = &copies[i]; void *db; uint64_t dof;
         if (!mtl_addr(e->lo, e->hi - e->lo, &db, &dof)) continue;
         enc_b_copy_buffer(blit_buf(0, 0, e->lo, e->hi), e->buf, e->off, (__bridge id<MTLBuffer>)db, dof, e->hi - e->lo); }
@@ -786,7 +790,7 @@ static void ubd_flush(void) {
 // The bytes [lo, lo+n) as the deferred updates leave them (ubd_covers holds): for bindless handles read from uniform memory (ubo_handle)
 static void ubd_read(uint64_t lo, size_t n, void *out) {
     for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i]; uint64_t a = e->lo > lo ? e->lo : lo, b = e->hi < lo + n ? e->hi : lo + n;
-        if (a < b) memcpy((uint8_t *)out + (a - lo), (const uint8_t *)e->buf.contents + e->off + (a - e->lo), (size_t)(b - a)); }
+        if (a < b) memcpy((uint8_t *)out + (a - lo), e->data + (a - e->lo), (size_t)(b - a)); }
 }
 void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!n) return;
@@ -802,8 +806,13 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
         if (!g_ubs_buf) MDIE("uniform update ring allocation failed %#zx", g_ubs_size);
         res_add(g_ubs_buf); g_ubs_off = 0;
     }
-    memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
-    if (defer) { g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf}; g_ubd_deferred++; args_dirty_all(); }   // see ubd_shadow
+    uint8_t *bytes = (uint8_t *)g_ubs_buf.contents + g_ubs_off;
+    memcpy(bytes, data, n);
+    if (defer) {
+        nvn_pending_add(&g_ubd_ranges, dst, n);
+        g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf, bytes};
+        g_ubd_deferred++; args_dirty_all();
+    }   // see ubd_shadow
     else enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
     g_ubs_off += need;
 }
@@ -6393,6 +6402,8 @@ static void bright_lut(NvShader *cs) {
     enc_c_pso(ce, ps); enc_c_dispatch(ce, MTLSizeMake((lut.width + 3) / 4, (lut.height + 3) / 4, (lut.depth + 3) / 4), MTLSizeMake(4, 4, 4)); enc_c_end(ce);
     args_dirty_all();
 }
+#include "game_scale.inc"
+
 static void dispatch(const p_dispatch *dp) {
     nx2_capture_facts(1);
     zskip_clear();
@@ -6404,6 +6415,7 @@ static void dispatch(const p_dispatch *dp) {
     if (dp->ind) { static int once; if (!once++) MLOG("indirect dispatch: first time (the GPU reads the threadgroup counts from %#llx)", (unsigned long long)dp->ind); }
     NvShader *cs = prog_get(S.cprog)->sh[5];
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
+    if (game_scale_dispatch(cs, dp)) return;
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
