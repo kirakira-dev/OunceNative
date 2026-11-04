@@ -275,5 +275,6 @@ static NSTextField *label(NSString *s, NSRect r) {
 void dmset_show(void) {
     if (!g_set) g_set = [DmSettings new];
     [g_set refresh];
+    [NSApp activateIgnoringOtherApps:YES];
     [g_set.win makeKeyAndOrderFront:nil];
 }
