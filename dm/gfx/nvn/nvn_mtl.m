@@ -100,7 +100,7 @@ static id<MTLSharedEvent> g_ev;
 static uint64_t g_fence;                        // Highest committed fence value (incremented exclusively by the submit thread)
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
-static uint64_t g_done;                         // Highest completed fence value (written by the completion callback)
+static _Atomic uint64_t g_done;                 // Highest completed fence value; publishes CPU-visible counter writes to replay.
 static uint64_t g_arena_made;
 static int g_allocprof = -1; static uint64_t g_ap_bytes[64], g_ap_fn[8];
 #define AP_B uint64_t _ap0 = g_allocprof > 0 ? g_dev.currentAllocatedSize : 0
@@ -463,21 +463,37 @@ typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(
 // second field), so after one clear the two compare equal and later conditional clears of that target are skipped. The host used to ignore the condition and write the time
 // into both fields, so every clear ran: the first tile-lighting round, the half-resolution scene depth its light volumes test against and the light accumulation were cleared
 // before the composite read them, and the 3D scene came out black.
-// Metal has no predication, so the condition is evaluated here at replay, on the CPU, from the records in memory. A report replayed earlier in this submission is not written yet
+// Metal has no predication, so the condition is evaluated here at replay, on the CPU, from the records in memory. A report replayed earlier in this or a pending submission is not written yet
 // (that happens when the GPU completes): a timestamp one counts with its known counter 0; a samples-passed result (an occlusion query, written from the visibility buffers) is
 // unknown, and a condition on it keeps drawing, as before (occlusion culling only saves work). Inside a block evaluated false, draws and clears are dropped
 static int g_rc_skip;   // a render-enable block evaluated false is active
 static nvn_hmap g_rc_pend = {.klen = sizeof(uint64_t)};
 static nvn_hmap g_rc_occ = {.klen = sizeof(uint64_t)};
+// Low two bits: timestamp (1) / unknown counter (2); remaining bits: the
+// submission fence that publishes the report. Replay can outrun GPU completion,
+// so starting another submission must not expose stale CPU counter bytes.
 static void rc_note(uint64_t a, int kind) {
     if (kind == 2) nvn_hm_put(&g_rc_occ, &a, (void *)1);
     else nvn_hm_del(&g_rc_occ, &a);
-    nvn_hm_put(&g_rc_pend, &a, (void *)(uintptr_t)kind);
+    nvn_hm_put(&g_rc_pend, &a, (void *)(uintptr_t)(((g_fence + 1) << 2) | kind));
+}
+static void rc_retire(void) {
+    uint64_t done = atomic_load_explicit(&g_done, memory_order_acquire);
+    for (uint32_t i = 0; i < g_rc_pend.cap;) {
+        uintptr_t pending = (uintptr_t)g_rc_pend.vals[i];
+        if (pending && (pending >> 2) <= done) {
+            uint64_t a; memcpy(&a, g_rc_pend.keys + (size_t)i * sizeof a, sizeof a);
+            nvn_hm_del(&g_rc_pend, &a); // Deletion can move another entry into i.
+        } else i++;
+    }
 }
 static int rc_value(uint64_t a, uint64_t *v) {   // 0 = unknown at encode time
     if (nvn_hm_get(&g_rc_occ, &a)) return 0;
-    uintptr_t kind = (uintptr_t)nvn_hm_get(&g_rc_pend, &a);
-    if (kind) { if (kind != 1) return 0; *v = 0; return 1; }
+    uintptr_t pending = (uintptr_t)nvn_hm_get(&g_rc_pend, &a);
+    if (pending && (pending >> 2) > atomic_load_explicit(&g_done, memory_order_acquire)) {
+        if ((pending & 3) != 1) return 0; *v = 0; return 1;
+    }
+    if (pending) nvn_hm_del(&g_rc_pend, &a);
     *v = *(const volatile uint64_t *)a; return 1;
 }
 // ---------- Occlusion queries (NVN_COUNTER_TYPE_SAMPLES_PASSED) ----------
@@ -554,7 +570,7 @@ static int tbdr_on(void);
 
 static uint64_t g_sub_serial;   // Submission index (used by the parallel precompile's 'predict only once per submission')
 void mtl_sub_begin(void) {
-    mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; nvn_hm_clear(&g_rc_pend, NULL); g_rc_skip = 0;
+    mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; rc_retire(); g_rc_skip = 0;
     if (tbdr_on() == 0 && g_ruler_pending) { g_ruler_truth = 0; g_ruler_pending = 0; MLOG("DM_NVN_RULER: switching to the mode under test"); }
     defer_drain();
     defer_reset();

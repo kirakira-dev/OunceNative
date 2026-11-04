@@ -56,6 +56,33 @@ int main(void) { @autoreleasepool {
     mtl_sub_begin(); condition[0] = 1;
     CHECK(rc_value((uint64_t)condition, &value) && value == 1);
     CHECK(mtl_wait(mtl_sub_commit(), 10000000000ull));
+    // The second submission is encoded while the first report is still on the
+    // GPU. Its condition must see that queued report, not stale CPU memory.
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent]; CHECK(gate);
+    [g_q4 waitForEvent:gate value:1];
+    condition[0] = 1; c.length = 0;
+    emit(&c, OP_SET_RT, &rt, sizeof rt); emit(&c, OP_RENDER_COND, &cond, sizeof cond);
+    emit(&c, OP_CLEAR_COLOR, &red, sizeof red);
+    emit(&c, OP_REPORT_COUNTER, timestamp, sizeof timestamp);
+    emit(&c, OP_RENDER_COND, &enabled, sizeof enabled); emit(&c, OP_END, NULL, 0);
+    mtl_sub_begin(); mtl_exec(c.bytes); uint64_t first = mtl_sub_commit();
+    CHECK(condition[0] == 1 && g_done < first);
+    c.length = 0;
+    emit(&c, OP_SET_RT, &rt, sizeof rt); emit(&c, OP_RENDER_COND, &cond, sizeof cond);
+    emit(&c, OP_CLEAR_COLOR, &black, sizeof black);
+    emit(&c, OP_RENDER_COND, &enabled, sizeof enabled); emit(&c, OP_END, NULL, 0);
+    mtl_sub_begin(); mtl_exec(c.bytes); uint64_t second = mtl_sub_commit();
+    gate.signaledValue = 1;
+    CHECK(mtl_wait(second, 10000000000ull)); CHECK(!mtl_last_commit_error());
+    cb = q_cb(); blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+        sourceSize:MTLSizeMake(8,8,1) toBuffer:pixels destinationOffset:0 destinationBytesPerRow:32 destinationBytesPerImage:256];
+    [blit endEncoding]; [cb commit]; [cb waitUntilCompleted]; CHECK(!cb.error);
+    for (unsigned i = 0; i < 64; i++) CHECK(bytes[i*4] == 255 && !bytes[i*4+1] && !bytes[i*4+2] && bytes[i*4+3] == 255);
+    condition[0] = 1; mtl_sub_begin();
+    CHECK(rc_value((uint64_t)condition, &value) && value == 1);
+    CHECK(mtl_wait(mtl_sub_commit(), 10000000000ull));
     printf("PASS conditional clear after %u reports; 64 red pixels preserved; pending reset and occlusion history\n", REPORTS);
+    puts("PASS queued report survives a submission boundary, then retires before CPU reuse");
     free(c.bytes); free(queries); return 0;
 }}
