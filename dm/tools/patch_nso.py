@@ -225,6 +225,8 @@ OBS = {
     (0x23f2980, 21, 'd1185008', 'Raiders ink-consumption entry: x0 = player logic + 0x614; orig sub x8,x0,#0x614'),
     (0x25099f8, 22, 'f9401e68', 'Raiders shooter update after repeat timer: x19 = PlayerInkActionShooter; orig ldr x8,[x19,#0x38]'),
     (0x22ec3a4, 23, 'a95b4ff4', 'Raiders movement completion: x28 = player logic + 0x5d8; orig ldp x20,x19,[sp,#0x1b0]'),
+    (0x35c88f0, 24, 'd503237f', 'Raiders sound-group update entry: x0 = group; orig pacibsp'),
+    (0x3537748, 25, 'f10022b5', 'Raiders sound-group update returned: x20 = group-array cursor; orig subs x21,x21,#8'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl

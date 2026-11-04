@@ -42,6 +42,8 @@ run: $(B)/t_textbox $(B)/t_padmap $(B)/t_touch $(B)/t_hid_receipt $(B)/t_hid_scr
 	$(PY) oe_notify.py $(B)/main.orig.bin
 $(B)/t_raiders_mods: t_raiders_mods.c ../hle_raiders_mods.c ../dm_raiders_mods.h ../dm.h | $(B)
 	clang -O1 -Wall -Werror -I.. $(GINC) -o $@ t_raiders_mods.c
+$(B)/t_raiders_music: t_raiders_music.c ../hle_raiders_music.c ../dm_raiders_music.h ../dm.h | $(B)
+	clang -O1 -Wall -Werror -I.. $(GINC) -o $@ t_raiders_music.c
 $(B)/t_i18n: t_i18n.c ../dm_i18n.c ../dm_i18n.h ../dm_i18n_tab.h | $(B)
 	clang -O1 -Wall -Werror -I.. -o $@ t_i18n.c ../dm_i18n.c
 $(B)/t_hud_dead: t_hud_dead.c ../dm_hud.h | $(B)

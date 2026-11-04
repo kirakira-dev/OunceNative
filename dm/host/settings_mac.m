@@ -5,6 +5,7 @@
 #import <GameController/GameController.h>
 #include "settings_mac.h"
 #include "game_profile.h"
+#include "dm_raiders_music.h"
 
 uint16_t g_dmset_bind[DMSET_N];
 int g_dmset_pad_by_label;
@@ -93,7 +94,7 @@ static NSString *const k_lang_name[] = {@"English (US)", @"English (UK)", @"Japa
 @property(strong) NSMutableArray<NSButton *> *bindButtons;   // indexed by action
 @property(strong) NSTextField *padLabel, *restartNote;
 @property(strong) NSPopUpButton *modePop, *langPop, *padPop;
-@property(strong) NSButton *soundBox, *fullBox, *rayBox;
+@property(strong) NSButton *soundBox, *musicBox, *fullBox, *rayBox;
 @property(assign) int capturing;   // action waiting for a key, -1 none
 @property(strong) id monitor;
 @end
@@ -174,6 +175,13 @@ static NSTextField *label(NSString *s, NSRect r) {
     _langPop.target = self; _langPop.action = @selector(envChanged:); [v addSubview:_langPop];
     y -= 40;
     _soundBox = [NSButton checkboxWithTitle:@"Sound" target:self action:@selector(envChanged:)]; _soundBox.frame = NSMakeRect(138, y, 280, 22); [v addSubview:_soundBox];
+    if (DM_GAME_PROGRAM_ID == 0x0400380020056000ull) {
+        y -= 30;
+        _musicBox = [NSButton checkboxWithTitle:@"Music" target:self action:@selector(musicChanged:)];
+        _musicBox.frame = NSMakeRect(138, y, 100, 22); [v addSubview:_musicBox];
+        NSTextField *note = label(@"Applies immediately", NSMakeRect(248, y + 2, 200, 18));
+        note.textColor = NSColor.secondaryLabelColor; [v addSubview:note];
+    }
     y -= 30;
     _fullBox = [NSButton checkboxWithTitle:@"Start in full screen" target:self action:@selector(fullChanged:)]; _fullBox.frame = NSMakeRect(138, y, 280, 22); [v addSubview:_fullBox];
     if(DM_GAME_PROGRAM_ID==0x0400380020056000ull) {
@@ -203,6 +211,8 @@ static NSTextField *label(NSString *s, NSRect r) {
     for (int i = 0; i < NLANG; i++) if ([k_lang_code[i] caseInsensitiveCompare:lang] == NSOrderedSame) li = i;
     [_langPop selectItemAtIndex:li];
     _soundBox.state = [env_get(@"DM_AUDIO", @"1") intValue] ? NSControlStateValueOn : NSControlStateValueOff;
+    _musicBox.state = dm_raiders_music_get() ? NSControlStateValueOn : NSControlStateValueOff;
+    _musicBox.enabled = dm_raiders_music_available();
     _fullBox.state = dmset_fullscreen() ? NSControlStateValueOn : NSControlStateValueOff;
     _rayBox.state = [env_get(@"DM_RAYTRACE", @"off") isEqualToString:@"ao"] ? NSControlStateValueOn : NSControlStateValueOff;
 }
@@ -233,6 +243,12 @@ static NSTextField *label(NSString *s, NSRect r) {
 - (void)resetBindings:(id)s { (void)s; for (int i = 0; i < DMSET_N; i++) g_dmset_bind[i] = k_act[i].def; _capturing = -1; save_bindings(); [self refresh]; }
 - (void)padChanged:(id)s { (void)s; g_dmset_pad_by_label = (int)_padPop.indexOfSelectedItem; [ud() setInteger:g_dmset_pad_by_label forKey:@"PadByLabel"]; if (g_change_fn) g_change_fn(); }
 - (void)fullChanged:(id)s { (void)s; [ud() setBool:_fullBox.state == NSControlStateValueOn forKey:@"StartFullScreen"]; }
+- (void)musicChanged:(id)s {
+    (void)s;
+    int enabled = _musicBox.state == NSControlStateValueOn;
+    env_set(@"DM_MUSIC", enabled ? @"1" : @"0");
+    dm_raiders_music_set(enabled);
+}
 - (void)envChanged:(id)s {
     (void)s;
     env_set(@"DM_OPMODE", _modePop.indexOfSelectedItem == 1 ? @"0" : @"1");
