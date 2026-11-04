@@ -29,13 +29,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct A { texture2d<float, access::read> tex [[id(0)]]; constant float *cb [[id(1)]]; };\n"
         "vertex float4 vs(uint i [[vertex_id]]) { return float4(i==1?3.0:-1.0,i==2?3.0:-1.0,0,1); }\n"
+        "vertex float4 vs_query(uint i [[vertex_id]], constant A &a [[buffer(0)]]) { return float4(i==1?3.0:-1.0,i==2?3.0:-1.0,a.cb[7]<0.5?-1.0:0.0,1); }\n"
         "fragment float4 query(float4 p [[position]], constant A &a [[buffer(0)]]) { if(a.tex.read(uint2(p.xy)).r<0.5 || p.x>=a.cb[1] || a.cb[7]<0.5) discard_fragment(); return float4(0); }\n"
         "fragment float4 write_zero() { return float4(0); }" options:nil error:&error]; CHECK(lib);
     prog_t programs[2] = {{.serial = nvn_new_serial()}, {.serial = nvn_new_serial()}};
     NvProg *p[2];
     for (int i = 0; i < 2; i++) {
         p[i] = [NvProg new]; p[i]->sh[0] = [NvShader new]; p[i]->sh[1] = [NvShader new];
-        p[i]->sh[0]->fn = [lib newFunctionWithName:@"vs"]; p[i]->sh[0]->range_ro = 1;
+        p[i]->sh[0]->fn = [lib newFunctionWithName:i ? @"vs" : @"vs_query"]; p[i]->sh[0]->range_ro = 1;
         p[i]->sh[1]->fn = [lib newFunctionWithName:i ? @"write_zero" : @"query"];
         p[i]->sh[1]->stage = 1; p[i]->sh[1]->range_ro = 1; p[i]->sh[1]->rf.color_mask = 1;
         serial_put(programs[i].serial, p[i]);
@@ -48,6 +49,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(parsed.b[0].cb_span == 32 && parsed.b[0].cb_words[0] == ((1ull << 1) | (1ull << 7)));
     q->rf.b[1] = parsed.b[0];
     if (!footprint) q->rf.b[1].cb_span = 0;
+    NvShader *qv = p[0]->sh[0]; qv->ae = [qv->fn newArgumentEncoderWithBufferIndex:0]; qv->arg_len = qv->ae.encodedLength;
+    qv->rf.nb = 1; qv->rf.b[0] = (nvn_rbind){.kind = NVN_RB_CBUF, .aid = 1, .reg = 0,
+        .cb_span = footprint ? 32 : 0, .cb_words = {1ull << 7}};
     for (id bad in @[@[], @[@1,@1], @[@256], @[@1.5], @"1,7"]) {
         binding[@"read_words"] = bad; CHECK(nvn_refl_from_json(reflection, &parsed, err, sizeof err));
     }
@@ -73,6 +77,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     emit(&c, OP_BIND_TEX, &tex, sizeof tex);
     p_bind_buf uniform = {.stage = 1, .index = 0, .addr = (uint64_t)uniforms, .size = 65536};
     emit(&c, OP_BIND_UBO, &uniform, sizeof uniform);
+    uniform.stage = 0; emit(&c, OP_BIND_UBO, &uniform, sizeof uniform);
     uint64_t type = NVN_COUNTER_TYPE_SAMPLES_PASSED; int nonzero = 1;
     for (unsigned i = 0; i < QUERIES; i++) {
         emit(&c, OP_SET_RT, &rt, sizeof rt);
@@ -125,6 +130,19 @@ int main(int argc, char **argv) { @autoreleasepool {
     }
     CHECK(mtl_wait(mtl_sub_commit(), 10000000000ull)); CHECK(!mtl_last_commit_error());
     CHECK(!memcmp(expected_bytes, uniforms, sizeof expected_bytes));
+    // Adjacent guest pools remain distinct Metal buffers. Combining their
+    // update ranges must not drop both writes during copyback.
+    void *adjacent = NULL; CHECK(!posix_memalign(&adjacent, 16384, 32768));
+    memset(adjacent, 0, 32768);
+    mtl_pool_add(adjacent, 16384); mtl_pool_add((uint8_t *)adjacent + 16384, 16384);
+    uint32_t pair[2] = {0x12345678, 0x9abcdef0};
+    mtl_sub_begin(); CHECK(rp_begin_ex(0));
+    mtl_sub_update(pair, (uint64_t)adjacent + 16380, 4);
+    mtl_sub_update(pair + 1, (uint64_t)adjacent + 16384, 4);
+    CHECK(g_nubd == 2 && g_ubd_ranges.count == 1);
+    CHECK(mtl_wait(mtl_sub_commit(), 10000000000ull)); CHECK(!mtl_last_commit_error());
+    CHECK(!memcmp((uint8_t *)adjacent + 16380, pair, sizeof pair));
+    mtl_pool_del(adjacent); mtl_pool_del((uint8_t *)adjacent + 16384); free(adjacent);
     printf("PASS 3 rounds of %u attachment-sampling queries, sparse uniform snapshots, writable draw, clear, scissor and rollover (%s: %llu passes, %llu merges)\n", QUERIES, merge ? "on" : "off", g_stat_pass, g_query_merges);
     vis_clear(); free(c.bytes); free(result); mtl_pool_del(uniforms); free(uniforms); return 0;
 }}

@@ -505,7 +505,7 @@ typedef struct { void *buf; uint32_t slot; } vis_slot;
 typedef struct { uint64_t base; int n; vis_slot s[]; } vis_list;
 #define VIS_SLOTS 8192
 typedef struct { __strong id<MTLBuffer> buf; uint64_t fence; } vis_buf;
-static vis_buf g_vis_ring[4]; static int g_vis_ring_n, g_vis_ring_i = -1;
+static vis_buf g_vis_ring[ALLOC_MAX]; static int g_vis_ring_n, g_vis_ring_i = -1;
 static id<MTLBuffer> g_vis; static uint32_t g_vis_n;   // This submission's visibility buffer and number of slots used
 static int vis_in_ring(id<MTLBuffer> b) { for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].buf == b) return 1; return 0; }
 static int g_vis_on, g_vis_counting, g_vis_cur = -1; static uint64_t g_vis_cur_pass;
@@ -526,7 +526,13 @@ static void vis_rebase(id<MTLBuffer> buffer) {
 }
 static vis_list *vis_snapshot(void) {
     vis_list *l = malloc(sizeof *l + g_nvs * sizeof(vis_slot)); l->n = g_nvs; l->base = g_vis_base;
-    for (int i = 0; i < g_nvs; i++) { l->s[i] = g_vs[i]; CFRetain(g_vs[i].buf); }
+    for (int i = 0; i < g_nvs; i++) {
+        l->s[i] = g_vs[i]; CFRetain(g_vs[i].buf);
+        // A cumulative report can read slots from an earlier submission. Its
+        // completion, not only the slot's producer, owns those bytes.
+        for (int j = 0; j < g_vis_ring_n; j++) if ((__bridge void *)g_vis_ring[j].buf == g_vs[i].buf && g_vis_ring[j].fence < g_fence + 1)
+            g_vis_ring[j].fence = g_fence + 1;
+    }
     return l;
 }
 // Target ranges of buffer writes (copies / inline uniform updates) already encoded in this submission but not yet executed on the GPU: reading these addresses on the CPU side at encode time yields old values (uv_proof avoids them when reading uniforms)
@@ -596,10 +602,19 @@ void mtl_sub_begin(void) {
     if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
     g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; nvn_pending_clear(&g_pending);
     zskip_clear(); g_zskip_count = 0;
-    int pick = -1;
-    for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
-    if (pick < 0 && g_vis_ring_n < 4) pick = g_vis_ring_n++;
-    if (pick < 0) { uint64_t oldest = UINT64_MAX; for (int i = 0; i < 4; i++) if (g_vis_ring[i].fence < oldest) { oldest = g_vis_ring[i].fence; pick = i; } if (oldest > g_done) mtl_wait(oldest, UINT64_MAX); }
+    // Query slots and command storage share the submission's completion fence.
+    // Pair their pools: a smaller independent query ring used to wait here even
+    // when an allocator was available, serializing CPU replay with GPU work.
+    int pick = g_alloc_cur;
+    if (g_vis_ring_n <= pick) g_vis_ring_n = pick + 1;
+    if (g_vis_ring[pick].buf && g_vis_ring[pick].fence > atomic_load_explicit(&g_done, memory_order_acquire)) {
+        // The allocator's producer has finished, but a later report still
+        // references its query storage. Keep that storage for the reader and
+        // replace this slot without stalling replay.
+        vis_rebase(g_vis_ring[pick].buf);
+        defer_obj_release(g_vis_ring[pick].buf);
+        g_vis_ring[pick].buf = nil;
+    }
     g_vis_ring_i = pick; g_vis_ring[pick].fence = UINT64_MAX;
     if (!g_vis_ring[pick].buf) { g_vis_ring[pick].buf = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis_ring[pick].buf); }
     g_vis = g_vis_ring[pick].buf;
@@ -793,6 +808,13 @@ static void ubd_flush(void) {
         for (int i = 0; i < n; i++) {
             id<MTLBuffer> buffer; size_t offset;
             uint64_t lo = g_ubd_ranges.ranges[i].lo, hi = g_ubd_ranges.ranges[i].hi;
+            void *destination; uint64_t destination_offset;
+            if (!mtl_addr(lo, hi - lo, &destination, &destination_offset)) {
+                // Adjacent guest ranges can belong to separate Metal buffers.
+                // Each original update was validated against its own pool.
+                static int noted; if (!noted++) MLOG("deferred uniform copyback spans separate memory pools; retaining the original ordered updates");
+                n = g_nubd; memcpy(copies, g_ubd, n * sizeof *copies); break;
+            }
             ubd_snapshot(lo, hi, &buffer, &offset);
             copies[i] = (ubd_ent){.lo = lo, .hi = hi, .buf = buffer, .off = offset};
         }
@@ -7761,7 +7783,7 @@ void mtl_exec(const uint8_t *p) {
 }
 
 // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
-static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
+static id<MTLRenderPipelineState> g_blit_pso, g_blit_cubic_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
@@ -8057,6 +8079,7 @@ int mtl_display_hz(void) {
 static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable)
 static CAMetalLayer *g_present_layer_resident;
 void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
+#include "present_bicubic.inc"
 static void present_pipeline(MTLPixelFormat format) {
     if (!g_blit_pso || g_blit_fmt != format) {
         static const char *src_msl =
@@ -8066,13 +8089,20 @@ static void present_pipeline(MTLPixelFormat format) {
             "struct Crop { float4 rect; float4 edge; };\n"
             "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
         NSError *e = nil;
-        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
+        NSString *source = present_bicubic_enabled() ? [@(src_msl) stringByAppendingString:@(present_bicubic_msl)] : @(src_msl);
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:nil error:&e];
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
+        if (present_bicubic_enabled()) {
+            pd.fragmentFunction = [lib newFunctionWithName:@"cubic"];
+            g_blit_cubic_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+            if (!g_blit_cubic_pso) MDIE("bicubic present pipeline failed %s", e.localizedDescription.UTF8String);
+            MLOG("Catmull-Rom bicubic presentation enabled");
+        }
         g_blit_fmt = format;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
@@ -8123,7 +8153,8 @@ static int present_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTextu
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
     [en setViewport:vp];
-    [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
+    [en setRenderPipelineState:g_blit_cubic_pso && vp.width > cw && vp.height > ch ? g_blit_cubic_pso : g_blit_pso];
+    [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
     float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
                    (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
     if (flip) { uv[1] += uv[3]; uv[3] = -uv[3]; }
@@ -8162,7 +8193,8 @@ static int present_blit_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLT
     uv[4] = (cx + 0.5f) / src.width; uv[5] = (cy + 0.5f) / src.height; uv[6] = (cx + cw - 0.5f) / src.width; uv[7] = (cy + ch - 0.5f) / src.height;
     if (flip) { uv[1] += uv[3]; uv[3] = -uv[3]; }
     [g_present_args setAddress:g_present_uv[uv_i].gpuAddress atIndex:0];
-    [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
+    [en setViewport:vp];
+    [en setRenderPipelineState:g_blit_cubic_pso && vp.width > cw && vp.height > ch ? g_blit_cubic_pso : g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     m4_end(en);
     return 1;
@@ -8242,7 +8274,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!present_encode_m4(cb, src, dr.texture, crop, alloc_i)) { [cb endCommandBuffer]; [g_q4 signalDrawable:dr]; return 0; }
     [cb endCommandBuffer];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    gpu_tag_begin(frame);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        gpu_tag_done(frame, f.GPUStartTime, f.GPUEndTime);
         if (f.error) MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String);
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
     }];
@@ -8278,7 +8312,6 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (target_ts > 0) [dr present];
     else if (period > 0) [dr presentAfterMinimumDuration:period]; else [dr present];
 #endif
-    (void)frame;
     return 1;
 }
 // ---------- Present thread ----------

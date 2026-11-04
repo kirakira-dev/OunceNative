@@ -10,6 +10,22 @@ uint64_t now_ns(void) { return bp_now(); }
 uint64_t nvn_new_serial(void) { static uint64_t n = 90000; return ++n; }
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL %d: %s\n", __LINE__, #x); return 1; } } while (0)
 static unsigned calls;
+static uint8_t pattern(int x, int y, int c) { return 32 + (x*13 + y*17 + c*23 + ((x^y)/3)*7) % 192; }
+// Independent 16-texel reference using the distance-domain cubic kernel. The
+// GPU combines the inner terms into nine bilinear samples instead.
+static double cubic_kernel(double x) {
+    x = fabs(x);
+    if (x < 1) return 1.5*x*x*x - 2.5*x*x + 1;
+    if (x < 2) return -0.5*x*x*x + 2.5*x*x - 4*x + 2;
+    return 0;
+}
+static int reference(double x, double y, int w, int h, int channel) {
+    double value = 0;
+    int bx = floor(x), by = floor(y);
+    for (int j = by-1; j <= by+2; j++) for (int i = bx-1; i <= bx+2; i++)
+        value += cubic_kernel(x-i) * cubic_kernel(y-j) * pattern(MAX(0,MIN(w-1,i)), MAX(0,MIN(h-1,j)), channel);
+    return (int)round(MAX(0,MIN(255,value)));
+}
 static int run(int metal4, MTLPixelFormat format, int flip, int bars, int stripes, int large, int direct) {
     NSUInteger sw = large ? 1920 : 96, sh = large ? 1080 : 80;
     int crop[4] = {16, 16, 64, 32};
@@ -22,8 +38,10 @@ static int run(int metal4, MTLPixelFormat format, int flip, int bars, int stripe
     const uint8_t colors[2][4] = {{128,64,200,255},{24,180,80,255}};
     for (NSUInteger y = 0; y < sh; y++) for (NSUInteger x = 0; x < sw; x++) {
         uint8_t *p = pixels + 4 * (y * sw + x);
-        if (x >= crop[0] && x < crop[0] + crop[2] && y >= crop[1] && y < crop[1] + crop[3])
-            memcpy(p, colors[stripes && y >= crop[1] + crop[3] / 2], 4);
+        if (x >= crop[0] && x < crop[0] + crop[2] && y >= crop[1] && y < crop[1] + crop[3]) {
+            if (stripes == 2) { for (int c=0;c<3;c++) p[c]=pattern(x-crop[0],y-crop[1],c); p[3]=255; }
+            else memcpy(p, colors[stripes && y >= crop[1] + crop[3] / 2], 4);
+        }
         else { p[1] = 255; p[3] = 255; }   // Poison outside the crop must never bleed into the output.
     }
     [src replaceRegion:MTLRegionMake2D(0,0,sw,sh) mipmapLevel:0 withBytes:pixels bytesPerRow:sw*4]; free(pixels);
@@ -69,6 +87,15 @@ static int run(int metal4, MTLPixelFormat format, int flip, int bars, int stripe
         // The spatial filter deliberately reconstructs a transition. Check the
         // known constant regions, outside a small band around the step edge.
         NSUInteger yy = y - top;
+        if (stripes == 2) {
+            double sx = (x+0.5)*crop[2]/dw-0.5;
+            double sy = ((flip ? height-1-yy : yy)+0.5)*crop[3]/height-0.5;
+            for (int c=0;c<3;c++) {
+                int delta=abs(p[direct ? 2-c : c]-reference(sx,sy,crop[2],crop[3],c));
+                worst=MAX(worst,delta); bad+=delta>2;
+            }
+            continue;
+        }
         if (stripes && abs((int)yy - (int)height / 2) < 8) continue;
         int color = stripes && ((yy >= height / 2) != flip);
         for (int c = 0; c < 3; c++) { int delta = abs(p[direct ? 2-c : c] - colors[color][c]); if (delta > worst) worst = delta; bad += delta > 2; }
@@ -78,12 +105,15 @@ static int run(int metal4, MTLPixelFormat format, int flip, int bars, int stripe
     CHECK(!bad); return 0;
 }
 int main(void) { @autoreleasepool {
-    setenv("DM_UPSCALER", "metalfx", 1); mtl_init();
+    if (!getenv("DM_UPSCALER")) setenv("DM_UPSCALER", "metalfx", 1); mtl_init();
     CHECK([MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]);
     for (int api = 0; api < 2; api++) for (int srgb = 0; srgb < 2; srgb++) for (int flip = 0; flip < 2; flip++)
         for (int direct = 0; direct < 2; direct++)
             CHECK(!run(api, srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm, flip, srgb, flip, 0, direct));
     for (int direct = 0; direct < 2; direct++) for (int i = 0; i < 6; i++)
         CHECK(!run(1, MTLPixelFormatRGBA8Unorm, i & 1, 0, 0, !(i & 1), direct));
-    puts("MetalFX crop, orientation, color, letterbox, resize and 4K checks passed"); return 0;
+    if (present_bicubic_enabled())
+        for (int api=0;api<2;api++) for (int srgb=0;srgb<2;srgb++) for (int flip=0;flip<2;flip++) for (int direct=0;direct<2;direct++)
+            CHECK(!run(api, srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm, flip, 0, 2, 0, direct));
+    puts("Presentation crop, orientation, color, letterbox, resize and 4K checks passed"); return 0;
 } }

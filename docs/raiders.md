@@ -2,17 +2,17 @@
 
 The development profile is `0400380020056000`, using update `v65536`, SDK 21.4.4, and NVN 231.39. Module IDs are recorded in `dm/games/0400380020056000/game.tsv`. The base build is identified, but runtime testing uses the update.
 
-The tested route covers native boot, menus, character creation, save reload, the airship conversations, and the first island. Virtual motion input completes the aiming tutorial, walking collects the first shard, and firing paints the ground. These checks also passed in the packaged app with an isolated save. The local package currently contains 1,429 translated shader programs. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes.
+The tested route covers native boot, menus, character creation, save reload, the airship conversations, and the first island. Virtual motion input completes the aiming tutorial, walking collects the first shard, and firing paints the ground. These checks also passed in the packaged app with an isolated save. The local package currently contains 1,434 translated shader programs. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes.
 
 The renderer fixes the opening scene's black output, swapped half-texture components, missing player skin, and command-list corruption. A later black-frame failure was traced to a full conditional-render table: dropped timestamp reports let repeated clears erase the scene. Dynamic report tracking fixes that reproduced failure. Other terrain differences and later areas still need checking against console output. Audio produces nonzero output, but listening and synchronization checks remain incomplete.
 
-Handheld remains the default. The app can present at 3840 x 2160 with MetalFX upscaling and a selectable handheld scene resolution. The latest 720p-scene island test is about 34 FPS with AC Low Power Mode enabled on the tested M4; 60 FPS remains unachieved. See [rendering and performance](performance.md) for measured changes and limits.
+Handheld remains the default. The app presents at 3840 x 2160 with selectable upscaling and scene resolution. The latest six-minute normal-power test uses a 720p scene, 1080p HUD, and Bicubic 4K output; its later island section averages about 58.5 FPS on the tested M4. It reaches 60 FPS with slower frames under sustained load, so a locked 60 is not established. See [rendering and performance](performance.md) for measurements and limits.
 
 ## Resolution
 
-Open Settings (Command-comma) → General. **Output resolution** selects the window/display size or a fixed 4K drawable. **Handheld scene** selects 1080p (original), 900p, or 720p (faster); the HUD remains 1080p before final presentation scaling. Both settings apply after restarting. This provides upscaled 4K output, not native 4K scene rendering. The scene setting applies only in handheld mode.
+Open Settings (Command-comma) → General. **Output resolution** selects the window/display size or a fixed 4K drawable. **Handheld scene** selects 1080p (original), 900p, or 720p (faster); the HUD remains 1080p before final presentation scaling. **Upscaling** selects MetalFX, Bicubic, or Bilinear. These settings apply after restarting. This provides upscaled 4K output, not native 4K scene rendering. The scene setting applies only in handheld mode.
 
-The equivalent environment settings are `DM_OUTPUT_RES=3840x2160`, `DM_SCENE_HEIGHT=720`, `DM_OPMODE=0`, and `DM_UPSCALER=metalfx`. The bundled overlays are generated locally from the owner's dump and do not modify it. Optional `DM_GAME_UPSCALER=metalfx` also replaces the identified game's spatial reconstruction filter in compatible dispatches; it uses MetalFX rather than matching that neural filter pixel for pixel.
+The equivalent environment settings are `DM_OUTPUT_RES=3840x2160`, `DM_SCENE_HEIGHT=720`, `DM_OPMODE=0`, and `DM_UPSCALER=bicubic`; `DM_UPSCALER=metalfx` selects MetalFX instead. The bundled overlays are generated locally from the owner's dump and do not modify it. Optional `DM_GAME_UPSCALER=metalfx` also replaces the identified game's spatial reconstruction filter in compatible dispatches; it uses MetalFX rather than matching that neural filter pixel for pixel.
 
 ## Controls
 

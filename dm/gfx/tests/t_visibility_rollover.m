@@ -57,6 +57,50 @@ int main(void) { @autoreleasepool {
         CHECK(mtl_wait(mtl_sub_commit(), 10000000000ull)); CHECK(!mtl_last_commit_error());
         CHECK(result[QUERIES][0] == (round + 1) * 64);
     }
+    vis_clear();
+    // Query storage must allow the same number of in-flight submissions as
+    // command storage. Hold the GPU while five submissions are encoded.
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent]; CHECK(gate);
+    [g_q4 waitForEvent:gate value:1];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+        dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ gate.signaledValue = 1; });
+    uint64_t last = 0;
+    for (unsigned round = 0; round < 5; round++) {
+        c.length = 0; emit(&c, OP_SET_RT, &rt, sizeof rt);
+        if (!round) emit(&c, OP_RESET_COUNTER, &type, 8);
+        emit(&c, OP_DRAW, &draw, sizeof draw);
+        uint64_t queued[] = {type, (uint64_t)result[round]};
+        emit(&c, OP_REPORT_COUNTER, queued, sizeof queued); emit(&c, OP_END, NULL, 0);
+        mtl_sub_begin(); mtl_exec(c.bytes); last = mtl_sub_commit();
+    }
+    CHECK(g_vis_ring_n >= 5);
+    gate.signaledValue = 1;
+    CHECK(mtl_wait(last, 10000000000ull)); CHECK(!mtl_last_commit_error());
+    for (unsigned round = 0; round < 5; round++) CHECK(result[round][0] == (round + 1) * 64);
+    puts("PASS five queued submissions retain independent query results without a four-buffer stall");
+    vis_clear();
+    id<MTLSharedEvent> producer_gate = [g_dev newSharedEvent], consumer_gate = [g_dev newSharedEvent];
+    CHECK(producer_gate && consumer_gate && !producer_gate.signaledValue && !consumer_gate.signaledValue);
+    [g_q4 waitForEvent:producer_gate value:1];
+    c.length = 0; emit(&c, OP_SET_RT, &rt, sizeof rt); emit(&c, OP_RESET_COUNTER, &type, 8);
+    emit(&c, OP_DRAW, &draw, sizeof draw); emit(&c, OP_END, NULL, 0);
+    mtl_sub_begin(); id<MTLBuffer> producer_queries = g_vis; mtl_exec(c.bytes); uint64_t producer = mtl_sub_commit();
+    [g_q4 waitForEvent:consumer_gate value:1];
+    c.length = 0; emit(&c, OP_SET_RT, &rt, sizeof rt); emit(&c, OP_DRAW, &draw, sizeof draw);
+    uint64_t cumulative[] = {type, (uint64_t)result[0]};
+    emit(&c, OP_REPORT_COUNTER, cumulative, sizeof cumulative); emit(&c, OP_END, NULL, 0);
+    mtl_sub_begin(); mtl_exec(c.bytes); uint64_t consumer = mtl_sub_commit();
+    producer_gate.signaledValue = 1; CHECK(mtl_wait(producer, 10000000000ull));
+    CHECK(!mtl_wait(consumer, 0));
+    CHECK(((const uint64_t *)producer_queries.contents)[0] == 64);
+    // The first query buffer's producer is complete, but a queued cumulative
+    // report still reads its slots. Starting another submission must retain it.
+    mtl_sub_begin(); uint64_t before_release = ((const uint64_t *)producer_queries.contents)[0];
+    uint64_t after_reuse = mtl_sub_commit();
+    consumer_gate.signaledValue = 1; CHECK(mtl_wait(after_reuse, 10000000000ull));
+    CHECK(before_release == 64);
+    CHECK(result[0][0] == 128);
+    puts("PASS completed query storage remains intact until all queued readers finish");
     vis_clear(); free(c.bytes); free(result);
     printf("PASS %u occlusion reports across buffer rollover; mid-pass start, resets, cumulative reports and cumulative samples across 10 submissions\n", QUERIES + 1);
     return 0;
