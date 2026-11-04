@@ -113,6 +113,7 @@ static NSTextField *label(NSString *s, NSRect r) {
     for (int i = 0; i < DMSET_N; i++) [_bindButtons addObject:[NSButton new]];
     _win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 560) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
     _win.title = @"Settings"; _win.releasedWhenClosed = NO; _win.delegate = self;
+    _win.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorMoveToActiveSpace;
     NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(12, 12, 616, 536)];
     NSTabViewItem *ctl = [[NSTabViewItem alloc] initWithIdentifier:@"controls"]; ctl.label = @"Controls"; ctl.view = [self controlsView];
     NSTabViewItem *gen = [[NSTabViewItem alloc] initWithIdentifier:@"general"]; gen.label = @"General"; gen.view = [self generalView];
