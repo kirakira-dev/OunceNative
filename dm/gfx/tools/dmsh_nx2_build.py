@@ -314,6 +314,8 @@ def vertex_fetch_inputs(src):
 
 
 def depth_entries(src):
+    # The compiler flag alone does not preserve position across depth and color passes.
+    src = src.replace('gl_Position [[position]]', 'gl_Position [[position, invariant]]')
     start = re.search(r'(?:\[\[\s*patch\([^\n]+\)\s*\]\]\s*)?\bvertex\s+main0_out\s+main0\s*\(', src)
     if not start:
         raise ValueError('missing vertex entry')
@@ -468,7 +470,9 @@ def main():
     provenance = dict(fork_commit=run(['git', '-C', args.fork, 'rev-parse', 'HEAD']).strip(),
                       compiler_sha256=sha(args.compiler),
                       compiler_source_sha256=sha(args.fork/'src/shader_recompiler/nx2_offline.cpp'),
-                      binding_sources_sha256={p: sha(HERE.parent/'nvn'/p) for p in ('nvn_refl.h', 'nvn_refl.m', 'nvn_mtl.m')},
+                      binding_sources_sha256={p: sha(HERE.parent/'nvn'/p) for p in
+                          ('nvn_refl.h', 'nvn_refl.m', 'nvn_mtl.m', 'nvn_raytrace.h',
+                           'nvn_raytrace.m', 'nvn_raytrace_source.m', 'nvn_raytrace_scene.inc')},
                       builder_sha256=sha(__file__), spirv_cross_sha256=sha(shutil.which('spirv-cross')),
                       metal_version=run(['xcrun', '-sdk', 'macosx', 'metal', '--version']),
                       metal_options=['-std=metal3.2', '-c', '-fpreserve-invariance', '-fno-fast-math'],

@@ -93,7 +93,7 @@ static NSString *const k_lang_name[] = {@"English (US)", @"English (UK)", @"Japa
 @property(strong) NSMutableArray<NSButton *> *bindButtons;   // indexed by action
 @property(strong) NSTextField *padLabel, *restartNote;
 @property(strong) NSPopUpButton *modePop, *langPop, *padPop;
-@property(strong) NSButton *soundBox, *fullBox;
+@property(strong) NSButton *soundBox, *fullBox, *rayBox;
 @property(assign) int capturing;   // action waiting for a key, -1 none
 @property(strong) id monitor;
 @end
@@ -176,8 +176,13 @@ static NSTextField *label(NSString *s, NSRect r) {
     _soundBox = [NSButton checkboxWithTitle:@"Sound" target:self action:@selector(envChanged:)]; _soundBox.frame = NSMakeRect(138, y, 280, 22); [v addSubview:_soundBox];
     y -= 30;
     _fullBox = [NSButton checkboxWithTitle:@"Start in full screen" target:self action:@selector(fullChanged:)]; _fullBox.frame = NSMakeRect(138, y, 280, 22); [v addSubview:_fullBox];
+    if(DM_GAME_PROGRAM_ID==0x0400380020056000ull) {
+        y -= 30;
+        _rayBox = [NSButton checkboxWithTitle:@"Ray-traced ambient occlusion (experimental)" target:self action:@selector(envChanged:)];
+        _rayBox.frame=NSMakeRect(138,y,420,22);[v addSubview:_rayBox];
+    }
     y -= 44;
-    _restartNote = label(@"Console mode, language and sound apply after a restart.", NSMakeRect(12, y, 420, 18));
+    _restartNote = label(@"Launch options apply after a restart.", NSMakeRect(12, y, 420, 18));
     _restartNote.textColor = NSColor.secondaryLabelColor; [v addSubview:_restartNote];
     NSButton *restart = [NSButton buttonWithTitle:@"Restart Now" target:self action:@selector(restart:)];
     restart.frame = NSMakeRect(440, y - 6, 140, 28); restart.enabled = [NSBundle.mainBundle.bundlePath hasSuffix:@".app"]; [v addSubview:restart];
@@ -199,6 +204,7 @@ static NSTextField *label(NSString *s, NSRect r) {
     [_langPop selectItemAtIndex:li];
     _soundBox.state = [env_get(@"DM_AUDIO", @"1") intValue] ? NSControlStateValueOn : NSControlStateValueOff;
     _fullBox.state = dmset_fullscreen() ? NSControlStateValueOn : NSControlStateValueOff;
+    _rayBox.state = [env_get(@"DM_RAYTRACE", @"off") isEqualToString:@"ao"] ? NSControlStateValueOn : NSControlStateValueOff;
 }
 - (void)refreshPads {
     NSMutableArray *n = [NSMutableArray array];
@@ -232,7 +238,8 @@ static NSTextField *label(NSString *s, NSRect r) {
     env_set(@"DM_OPMODE", _modePop.indexOfSelectedItem == 1 ? @"0" : @"1");
     env_set(@"DM_LANG", k_lang_code[_langPop.indexOfSelectedItem]);
     env_set(@"DM_AUDIO", _soundBox.state == NSControlStateValueOn ? @"1" : @"0");
-    _restartNote.stringValue = @"Saved. Restart the game to apply console mode, language and sound.";
+    if(_rayBox)env_set(@"DM_RAYTRACE",_rayBox.state==NSControlStateValueOn?@"ao":@"off");
+    _restartNote.stringValue = @"Saved. Restart the game to apply launch options.";
     _restartNote.textColor = NSColor.systemOrangeColor;
 }
 - (void)restart:(id)s {

@@ -3,6 +3,7 @@
 // The controller applet reports one player. Motion comes from the front end.
 #include "hle.h"
 #include "dm_input.h"
+#include "dm_raiders_mods.h"
 #include "dm_motion.h"
 #include "front.h"
 #include <stdatomic.h>
@@ -97,6 +98,12 @@ static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id == 
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
 static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of the two paths is deflected more
 
+void dm_input_current(uint64_t *buttons, int32_t *lx, int32_t *ly) {
+    uint64_t k=atomic_load(&g_axes), p=atomic_load(&g_pad_axes);
+    *buttons=atomic_load(&g_btn)|atomic_load(&g_pad_btn);
+    *lx=pick(ax(k,0),ax(p,0)); *ly=pick(ax(k,1),ax(p,1));
+}
+
 static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
@@ -104,6 +111,9 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     uint64_t b = atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_pad_btn) | atomic_exchange(&g_pad_latch, 0);
     uint64_t k = atomic_load(&g_axes), p = atomic_load(&g_pad_axes);
     s->lx = pick(ax(k, 0), ax(p, 0)); s->ly = pick(ax(k, 1), ax(p, 1)); s->rx = pick(ax(k, 2), ax(p, 2)); s->ry = pick(ax(k, 3), ax(p, 3));
+    // Flight reads the original state through dm_input_current. Do not also
+    // walk, throw a subweapon, or trigger shoulder actions in the game.
+    dm_raiders_mods_filter_input(&b,&s->lx,&s->ly);
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
     if (s->ly > STICK_THRESH) b |= 1u << 17;

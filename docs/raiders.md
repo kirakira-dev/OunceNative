@@ -2,7 +2,7 @@
 
 The development profile is `0400380020056000`, using update `v65536`, SDK 21.4.4, and NVN 231.39. Module IDs are recorded in `dm/games/0400380020056000/game.tsv`. The base build is identified, but runtime testing uses the update.
 
-The tested route covers native boot, menus, character creation, save reload, the airship conversations, and the first island. Virtual motion input completes the aiming tutorial, walking collects the first shard, and firing paints the ground. These checks also passed in the packaged app with an isolated save. The local package currently contains 1,274 translated shader programs. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes.
+The tested route covers native boot, menus, character creation, save reload, the airship conversations, and the first island. Virtual motion input completes the aiming tutorial, walking collects the first shard, and firing paints the ground. These checks also passed in the packaged app with an isolated save. The local package currently contains 1,429 translated shader programs. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes.
 
 The renderer fixes the opening scene's black output, swapped half-texture components, missing player skin, and command-list corruption. A later black-frame failure was traced to a full conditional-render table: dropped timestamp reports let repeated clears erase the scene. Dynamic report tracking fixes that reproduced failure. Other terrain differences and later areas still need checking against console output. Audio produces nonzero output, but listening and synchronization checks remain incomplete.
 
@@ -11,6 +11,22 @@ Handheld remains the default. In docked mode, the observed main scene renders at
 ## Controls
 
 The default keyboard controls are WASD to move, IJKL for the right stick, Z to confirm, X to jump, O to fire, Q for ZL, and V for Y. Hold the right mouse button and drag to aim with virtual motion input. Option plus an arrow key adjusts the same motion input in small steps. Keyboard and controller button mappings are available in the app's settings with Command-comma. Physical controller motion sensors are not connected yet.
+
+## Mods
+
+Open **Mods** in the macOS menu bar while the game is active. The menu contains Player Flight / Noclip (Command-Shift-F), Infinite Ink (Command-Shift-I), Rapid Fire (Command-Shift-R), Disable All Mods (Command-Shift-0), and Mod Controls. Mods start disabled unless explicitly requested through `DM_RAIDERS_MODS=ink,rapid,fly`.
+
+Flight moves the player along world X/Z axes with the left stick, ascends with R, descends with L, and boosts with left-stick click. The right stick keeps controlling the camera. Default keys are WASD, U/E for ascent/descent, F for boost, and IJKL for camera movement. Disabling flight returns movement to the game. Infinite Ink refills both reserves; Rapid Fire removes the shooter's repeat delay. Other weapon types are not covered by the rapid-fire hook.
+
+The hooks require the exact v65536 main build and verify the local player's ownership and object types before writing. Rebuild the patched main module after updating the host; the menu stays disabled if the three required observation gates are absent. These are experimental gameplay modifications; later scenes and all weapons have not been tested. Flight bypasses physical movement constraints, but damage volumes and story triggers remain active, including below the ground. It does not grant invulnerability.
+
+## Experimental ray tracing
+
+Ray tracing is **off by default**. Set `DM_RAYTRACE=ao` in the launch environment or enable **Ray-traced ambient occlusion (experimental)** under Settings → General, then restart. `DM_RAYTRACE=off` disables it. It requires an Apple GPU with hardware ray tracing (Apple GPU family 9 or later).
+
+This mode captures opaque triangles from the game's vertex draws, builds a Metal acceleration structure, and traces eight ambient-occlusion rays per covered pixel at half resolution. A bilateral composite applies contact shading before tone mapping and the HUD. It does not implement ray-traced reflections, global illumination, or full path tracing. Geometry culled by the game, alpha-tested surfaces, unsupported primitive layouts, and indirect draws may be absent. A primary-ray depth check rejects shading where captured geometry does not match the visible surface.
+
+The airship replay traces about 333,000 triangles from 203 draws. It adds substantial CPU/GPU cost and shader compilation at startup; the user reported increased lag and requested it disabled. Synthetic Metal tests cover real occlusion, depth mismatch rejection, alpha preservation, orientation, instancing, and unchanged raster output. The larger island scene remains experimental and has not received equivalent visual validation.
 
 ## Build from an extracted dump
 

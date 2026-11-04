@@ -219,6 +219,13 @@ CUTS = {
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
 OBS = {
+  # Raiders v65536: state callbacks, with the original instruction and all
+  # registers preserved. Host-side mods remain disabled until selected.
+  '663c2e087a083f05307f229dfc4042d5': [
+    (0x23f2980, 21, 'd1185008', 'Raiders ink-consumption entry: x0 = player logic + 0x614; orig sub x8,x0,#0x614'),
+    (0x25099f8, 22, 'f9401e68', 'Raiders shooter update after repeat timer: x19 = PlayerInkActionShooter; orig ldr x8,[x19,#0x38]'),
+    (0x22ec3a4, 23, 'a95b4ff4', 'Raiders movement completion: x28 = player logic + 0x5d8; orig ldp x20,x19,[sp,#0x1b0]'),
+  ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
   '646761f643afebb379edd5e6a5151af2': [

@@ -2391,7 +2391,20 @@ static void shmap_load(void) {
     warm_start();
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+#include "nvn_raytrace.h"
+static int raytrace_enabled(void) {
+    static int on; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e=getenv("DM_RAYTRACE"); on=e && !strcmp(e,"ao");
+        if (on && (DM_GAME_PROGRAM_ID!=0x0400380020056000ull || !g_dev.supportsRaytracing || ![g_dev supportsFamily:MTLGPUFamilyApple9])) {
+            MLOG("ray tracing unavailable: this mode requires Raiders and an Apple GPU with hardware ray tracing"); on=0;
+        }
+        if (on) MLOG("experimental hardware ray tracing: ambient occlusion enabled");
+    });
+    return on;
+}
+
+@interface NvShader : NSObject { @public id<MTLFunction> fn; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr; int ray_capture, ray_camera, ray_solid; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     id<MTLLibrary> vfetch_lib; NSString *vfetch_entry; uint32_t vfetch_mask;
     NSMutableDictionary<NSNumber *, id> *vfetch_functions;
     id<MTLLibrary> color_lib; NSString *color_entry; uint8_t color_mask; uint32_t varying_inputs, varying_outputs;
@@ -2588,6 +2601,29 @@ static NvShader *shader_load(NSString *pc, int stage) {
     if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("[RED] shader %s reflection conversion failed: %s", pc.UTF8String, err); return nil; }
     if (o->rf.tess.valid && o->rf.tess.stage != stage) { MLOG("[RED] tessellation variant %s has the wrong stage", pc.UTF8String); return nil; }
     if (rt_range_on() || query_merge_on()) o->range_ro=rt_range_bindings_ro(j);
+    if (raytrace_enabled() && (stage==0 || stage==1)) {
+        NSString *source=[NSString stringWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.metal",g_msl_dir,pc] encoding:NSUTF8StringEncoding error:nil];
+        if (stage==1) o->ray_solid=source && ![source containsString:@"discard_fragment"] && ![source containsString:@"[[depth("] && ![source containsString:@"[[sample_mask]]"];
+        if (stage==0 && !o->rf.tess.valid && !o->rf.geometry.valid && o->rf.abi!=13) {
+            NSString *instrumented=nvn_ray_vertex_source(source);
+            if (instrumented) {
+                MTLCompileOptions *options=[MTLCompileOptions new]; options.mathMode=MTLMathModeSafe; options.languageVersion=MTLLanguageVersion3_2;
+                options.preserveInvariance=YES;
+                NSError *rt_error=nil; id<MTLLibrary> captured=[g_dev newLibraryWithSource:instrumented options:options error:&rt_error];
+                if (captured) { lib=captured; o->ray_capture=1; }
+                else MLOG("ray tracing skips vertex %s: %s",pc.UTF8String,rt_error.localizedDescription.UTF8String);
+            }
+            for (NSDictionary *binding in j[@"bindings"]) if ([binding[@"msl_name"] isEqual:@"c8"] && [binding[@"kind"] isEqual:@"cbuf"] && [binding[@"reg"] intValue]==5) {
+                int rows=1; for(int r=0;r<8;r++) rows&=[source containsString:[NSString stringWithFormat:@"(*spvDescriptorSet0.c8).data[%du]",r]];
+                o->ray_camera=rows;
+            }
+            for (NSDictionary *binding in j[@"bindings"]) if ([binding[@"msl_name"] isEqual:@"c3"] && [binding[@"kind"] isEqual:@"cbuf"] && [binding[@"reg"] intValue]==0) {
+                int rows=1; for(int r=0;r<3;r++) rows&=[source containsString:[NSString stringWithFormat:@"(*spvDescriptorSet0.c3).data[%du]",r]];
+                for(int r=7;r<11;r++) rows&=[source containsString:[NSString stringWithFormat:@"(*spvDescriptorSet0.c3).data[%du]",r]];
+                if (rows && [source containsString:@"out.gl_Position.w = spvFAdd(fma("]) o->ray_camera=2;
+            }
+        }
+    }
     NSString *entry = j[@"entry"];
     if (stage == 4 || o->rf.geometry.valid || (stage == 0 && !o->rf.tess.valid)) {
         atomic_fetch_add(&g_vs_loaded, 1);
@@ -5950,12 +5986,14 @@ static void nx2_capture_facts(int compute) {
     }
 }
 
+#include "nvn_raytrace_scene.inc"
 static void draw_tess(NvProg *pr, const p_draw *dw, const p_draw_idx *di);
 static void draw_geometry(NvProg *pr, const p_draw *dw, const p_draw_idx *di);
 static void draw(const p_draw *dw, const p_draw_idx *di) {
     nx2_capture_facts(0);
     if (!S.prog) { RED_ONCE(18, "no program bound before the draw"); PD("Z %llu draw skipped: no program bound", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
+    if (raytrace_enabled()) ray_composite_before(pr);
     if ((dw ? dw->prim : di->prim) == 0xE) { draw_tess(pr, dw, di); return; }
     if (pr && pr->geometry_present) { draw_geometry(pr, dw, di); return; }
     if (g_nubd && g_enc && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); }   // land the deferred inline updates before this draw (see ubd_conflict)
@@ -6140,6 +6178,7 @@ frz_plain:;
     if (pr->sh[1]) encode_args(en, pr->sh[1], 1, 0);
     // Parameter binding captures the actual resources under the registry lock; if the version changed between the eligibility check and the binding, split and retry before any GPU draw.
     if ((g_rt_range_active || g_enc_mode == 5) && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) { rp_end(); draw(dw, di); return; }
+    if (raytrace_enabled()) ray_capture_draw(pr,dw,di,(id<MTL4RenderCommandEncoder>)en);
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;
     switch (prim) {

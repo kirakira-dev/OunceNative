@@ -25,7 +25,7 @@ def format_map(nvn_names, compiler_formats):
             if name in compiler_formats:
                 result[nvn + suffix] = name
     result.update(
-        RGBA8_SRGB='A8B8G8R8_SRGB', RGB10A2='A2B10G10R10_UNORM',
+        RGBA8_SRGB='A8B8G8R8_SRGB', RGB565='R5G6B5_UNORM', RGB10A2='A2B10G10R10_UNORM',
         R11G11B10F='B10G11R11_FLOAT', RGB9E5F='E5B9G9R9_FLOAT',
         DEPTH16='D16_UNORM', DEPTH24='X8_D24_UNORM', DEPTH32F='D32_FLOAT',
         STENCIL8='S8_UINT', DEPTH24_STENCIL8='D24_UNORM_S8_UINT',

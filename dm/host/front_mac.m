@@ -12,6 +12,7 @@
 #include "dm_input.h"
 #include "dm_motion.h"
 #include "dm_uiscreen.h"
+#include "dm_raiders_mods.h"
 #include "settings_mac.h"
 void mtl_set_ui_rect_fn(void (*fn)(double *y, double *h));
 static void ui_rect_frac(double *fy, double *fh) { int x, y, w, h, rw = 0, rh = 0; dm_ui_rect(&x, &y, &w, &h); if (dm_screen_real(&rw, &rh) && rh > 0) { *fy = (double)y / rh; *fh = (double)h / rh; } }   // Same as front_ios.m: vertical position and height of the UI rectangle (as fractions of the frame height)
@@ -175,6 +176,24 @@ static NSMenuItem *menu_item(NSString *title, SEL sel, NSString *key, NSEventMod
 @end
 @implementation DmMenuTarget
 - (void)settings:(id)s { (void)s; dmset_show(); }
+- (void)raidersMod:(NSMenuItem *)item {
+    unsigned bit=[item.representedObject unsignedIntValue];
+    dm_raiders_mods_set(bit ? dm_raiders_mods_get()^bit : 0);
+}
+- (void)raidersHelp:(id)sender {
+    (void)sender;
+    NSAlert *a=[NSAlert new];a.messageText=@"Raiders Mods";
+    a.informativeText=@"Player Flight / Noclip\nLeft stick: move along the world's horizontal axes\nR / L: ascend / descend\nLeft-stick click: move faster\nRight stick: look around\n\nDefault keyboard controls: WASD to move, U / E up / down, F to boost, IJKL to look. Rebindings in Settings also apply.\n\nInfinite Ink keeps both ink reserves full. Rapid Fire removes the shooter's repeat delay. Disable All Mods restores normal movement and weapon behavior. Mods start disabled on each launch.";
+    [a addButtonWithTitle:@"OK"];[a runModal];
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if(item.action==@selector(raidersMod:)) {
+        unsigned bit=[item.representedObject unsignedIntValue];
+        item.state=bit && (dm_raiders_mods_get()&bit) ? NSControlStateValueOn : NSControlStateValueOff;
+        return dm_raiders_mods_available();
+    }
+    return YES;
+}
 @end
 static void build_menus(NSString *name) {
     static DmMenuTarget *t; t = [DmMenuTarget new];
@@ -193,6 +212,20 @@ static void build_menus(NSString *name) {
     NSMenu *view = [[NSMenu alloc] initWithTitle:@"View"];
     [view addItem:menu_item(@"Enter Full Screen", @selector(toggleFullScreen:), @"f", NSEventModifierFlagCommand | NSEventModifierFlagControl, nil)];
     NSMenuItem *vi = [NSMenuItem new]; vi.submenu = view; [bar addItem:vi];
+    if(DM_GAME_PROGRAM_ID==0x0400380020056000ull) {
+        NSMenu *mods=[[NSMenu alloc] initWithTitle:@"Mods"];
+        NSArray *labels=@[@"Player Flight / Noclip",@"Infinite Ink",@"Rapid Fire",@"Disable All Mods"];
+        NSArray *keys=@[@"f",@"i",@"r",@"0"];
+        unsigned bits[]={DM_RAIDERS_FLY,DM_RAIDERS_INFINITE_INK,DM_RAIDERS_RAPID_FIRE,0};
+        for(unsigned i=0;i<4;i++) {
+            if(i==3)[mods addItem:NSMenuItem.separatorItem];
+            NSMenuItem *item=menu_item(labels[i],@selector(raidersMod:),keys[i],NSEventModifierFlagCommand|NSEventModifierFlagShift,t);
+            item.representedObject=@(bits[i]);[mods addItem:item];
+        }
+        [mods addItem:NSMenuItem.separatorItem];
+        [mods addItem:menu_item(@"Mod Controls…",@selector(raidersHelp:),@"",0,t)];
+        NSMenuItem *mi=[NSMenuItem new];mi.submenu=mods;[bar addItem:mi];
+    }
     NSMenu *win = [[NSMenu alloc] initWithTitle:@"Window"];
     [win addItem:menu_item(@"Minimize", @selector(performMiniaturize:), @"m", NSEventModifierFlagCommand, nil)];
     NSMenuItem *wi = [NSMenuItem new]; wi.submenu = win; [bar addItem:wi];
