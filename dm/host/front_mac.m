@@ -5,6 +5,7 @@
 // A connected game controller (GameController framework: Switch Pro, Joy-Con, Xbox, DualSense, ...) is merged in, buttons by position as on iOS (DmGamepad.m) unless the settings say by label.
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/CATransaction.h>
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
@@ -82,6 +83,26 @@ void front_configure_app(int *argc, char ***argv) {
 }
 
 static CAMetalLayer *g_layer;
+// Keep Metal's drawable in backing pixels when the window resizes or moves
+// between displays. A stale drawable is stretched by AppKit after presentation.
+@interface DmGameView : NSView
+- (void)updateDrawableSize;
+@end
+@implementation DmGameView
+- (void)updateDrawableSize {
+    if (![self.layer isKindOfClass:CAMetalLayer.class]) return;
+    CAMetalLayer *layer = (CAMetalLayer *)self.layer;
+    NSSize pixels = [self convertSizeToBacking:self.bounds.size];
+    if (pixels.width < 1 || pixels.height < 1) return;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    layer.contentsScale = self.window.backingScaleFactor ?: 1;
+    layer.drawableSize = CGSizeMake(round(pixels.width), round(pixels.height));
+    [CATransaction commit];
+}
+- (void)setFrameSize:(NSSize)size { [super setFrameSize:size]; [self updateDrawableSize]; }
+- (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self updateDrawableSize]; }
+- (void)viewDidMoveToWindow { [super viewDidMoveToWindow]; [self updateDrawableSize]; }
+@end
 static uint8_t g_down[128];   // keyboard state by macOS virtual key code
 static uint64_t g_pad_btn;
 static int32_t g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry;
@@ -198,13 +219,15 @@ void front_run(void (*guest)(void)) {
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
-        NSView *v = win.contentView;
+        DmGameView *v = [[DmGameView alloc] initWithFrame:r];
+        win.contentView = v;
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
         v.layer = g_layer;
+        [v updateDrawableSize];
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
         win.contentAspectRatio = NSMakeSize(16, 9);
         [win center];

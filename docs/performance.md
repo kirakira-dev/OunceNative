@@ -11,6 +11,12 @@ The November 4, 2026 changes fix Raiders' conditional-clear overflow and reduce 
 
 Raiders retains handheld mode as its default because the docked island route still has severe stalls. The app's operation-mode setting or `DM_OPMODE=0` selects handheld mode. `DM_OPMODE=1` selects docked mode. `DM_GAME_RES` does not change Pokopia's internal resolution in this build. A 3840 x 2160 screenshot produced with `DM_NVN_SHOT_OUT` applies presentation scaling; it is not evidence of native 4K scene rendering.
 
+Mac NX2 builds now use MetalFX spatial scaling when the display output is larger than the valid game image. `DM_UPSCALER=linear` selects the previous bilinear path; `DM_UPSCALER=metalfx` explicitly enables MetalFX. Cropping and orientation are applied before scaling, with perceptual SDR color handling and aspect-preserving letterboxing. Unsupported devices and non-upscaled output retain the ordinary presentation path. The drawable follows the window's backing-pixel size on resize and display changes, including full screen.
+
+The presentation regression passes crop, orientation, sRGB, letterbox, resize, and 1080p-to-4K checks on both Metal 3 and Metal 4. Known constant regions differ by at most one byte value. The 4K Metal 4 presentation path alone measures roughly 8.5 to 9.0 ms on this M4; this includes the crop and output passes. These isolated timings exclude scene rendering. A full-screen airship replay has median frame times near 16.7 ms, with higher tail times, at a fitted 3420 x 1924 output. It is not a sustained 4K60 gameplay result.
+
+The reported half-speed Raiders session was running an older backup application. Relaunching the updated canonical app restored normal animation and text speed, confirmed by the user. The SDK counter frequency matches the host, and deterministic test-clock mode was disabled. A separate 30 FPS probe kept the game's animation step at one, so falling below its expected 60 FPS can still slow gameplay. No simulation-clock multiplier or frame-step patch was applied.
+
 ## Retained changes
 
 Conditional-render reports use a dynamic address table. The old 256-entry table lost timestamp reports after sufficiently many occlusion queries. Later conditional clears then read stale CPU values and erased an already rendered image. The regression preserves all 64 test pixels after 8,192 reports; the old implementation produces black pixels.

@@ -3,13 +3,16 @@
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#define g_ft nvn_flushed_textures
 #include "../nvn/hle_nvn.c"
+#undef g_ft
 uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
+int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; } // This test uses host stacks only.
 #ifdef CROP_LEGACY_HEADER
 #include CROP_LEGACY_HEADER
 #define ENCODE legacy_present_encode
