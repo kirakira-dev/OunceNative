@@ -40,7 +40,7 @@ run: $(B)/t_textbox $(B)/t_padmap $(B)/t_touch $(B)/t_hid_receipt $(B)/t_hid_scr
 	for m in en zh none sysen systw tags game; do TMPDIR="$(abspath $(B))" $(B)/t_i18n $$m || exit 1; done
 	$(PY) movie_cut.py $(B)/main.orig.bin $(B)/subsdk0.orig.bin
 	$(PY) oe_notify.py $(B)/main.orig.bin
-$(B)/t_raiders_mods: t_raiders_mods.c ../hle_raiders_mods.c ../dm_raiders_mods.h ../dm.h | $(B)
+$(B)/t_raiders_mods: t_raiders_mods.c ../hle_raiders_mods.c ../dm_raiders_mods.h ../dm_raiders_weapons.inc ../dm.h | $(B)
 	clang -O1 -Wall -Werror -I.. $(GINC) -o $@ t_raiders_mods.c
 $(B)/t_raiders_music: t_raiders_music.c ../hle_raiders_music.c ../dm_raiders_music.h ../dm.h | $(B)
 	clang -O1 -Wall -Werror -I.. $(GINC) -o $@ t_raiders_music.c

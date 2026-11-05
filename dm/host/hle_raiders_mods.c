@@ -7,7 +7,9 @@
 #include <math.h>
 
 #define RAIDERS_BUILD "663c2e087a083f05307f229dfc4042d5"
+#include "dm_raiders_weapons.inc"
 static _Atomic unsigned g_mods;
+static _Atomic unsigned g_weapon;
 static _Atomic uint64_t g_player;
 static uint8_t *g_main;
 static pthread_once_t g_once=PTHREAD_ONCE_INIT;
@@ -16,6 +18,12 @@ static void (*g_body_velocity)(uint64_t,const float *,int);
 static float (*g_collision_radius)(uint64_t);
 static uint64_t g_fly_player,g_fly_body,g_fly_time;
 static float g_fly_position[3];
+static unsigned g_fly_mode;
+static uint64_t g_weapon_player,g_weapon_manager;
+static unsigned g_weapon_applied;
+static uint32_t g_weapon_original;
+static uint32_t g_weapon_original_variant;
+static void (*g_equip)(uint64_t,uint64_t,uint64_t,uint64_t,unsigned,uint32_t,unsigned,unsigned);
 static int g_diagnostics;
 static uint64_t g_report_time;
 static uint64_t g_shot_player,g_shot_time;
@@ -31,15 +39,20 @@ static void init(void) {
     g_body_position=(void *) (g_main+0x39fb5f0);
     g_body_velocity=(void *) (g_main+0x39fc200);
     g_collision_radius=(void *) (g_main+0x246c520);
+    g_equip=(void *)(g_main+0x2420d20);
     const char *s=getenv("DM_RAIDERS_MODS");
     if(s) { unsigned f=0; char *copy=strdup(s),*save=NULL;
         for(char *p=strtok_r(copy,",",&save);p;p=strtok_r(NULL,",",&save)) {
             if(!strcmp(p,"ink"))f|=DM_RAIDERS_INFINITE_INK;
             else if(!strcmp(p,"rapid"))f|=DM_RAIDERS_RAPID_FIRE;
             else if(!strcmp(p,"fly"))f|=DM_RAIDERS_FLY;
+            else if(!strcmp(p,"swim"))f|=DM_RAIDERS_SWIM;
         }
         free(copy);atomic_store(&g_mods,f);
     }
+    s=getenv("DM_RAIDERS_WEAPON");
+    if(s)for(unsigned i=1;i<sizeof weapons/sizeof weapons[0];i++)
+        if(!strcmp(s,weapons[i].row))atomic_store(&g_weapon,i);
 }
 int dm_raiders_mods_available(void) {
     // Menus can be constructed before modules are loaded; do not latch that
@@ -51,17 +64,27 @@ int dm_raiders_mods_available(void) {
 }
 unsigned dm_raiders_mods_get(void) { return atomic_load(&g_mods); }
 void dm_raiders_mods_filter_input(uint64_t *buttons,int32_t *lx,int32_t *ly) {
-    if(atomic_load(&g_mods)&DM_RAIDERS_FLY) {
+    unsigned flags=atomic_load(&g_mods);
+    if(flags&DM_RAIDERS_FLY) {
         *buttons&=~(uint64_t)(DM_BTN_L|DM_BTN_R|DM_BTN_LS);
         *lx=*ly=0;
+    } else if((flags&DM_RAIDERS_SWIM) && (*buttons&DM_BTN_ZL)) {
+        *buttons&=~(uint64_t)(DM_BTN_L|DM_BTN_R|DM_BTN_LS);
     }
 }
 void dm_raiders_mods_set(unsigned flags) {
     if(dm_raiders_mods_available()) {
-        flags&=DM_RAIDERS_INFINITE_INK|DM_RAIDERS_RAPID_FIRE|DM_RAIDERS_FLY;
+        flags&=DM_RAIDERS_INFINITE_INK|DM_RAIDERS_RAPID_FIRE|DM_RAIDERS_FLY|DM_RAIDERS_SWIM;
         atomic_store(&g_mods,flags);
         if(g_diagnostics)LOG("Raiders mods flags: %u",flags);
     }
+}
+unsigned dm_raiders_weapon_count(void) {return sizeof weapons/sizeof weapons[0];}
+const char *dm_raiders_weapon_family(unsigned index) {return index<dm_raiders_weapon_count()?weapons[index].family:"";}
+const char *dm_raiders_weapon_label(unsigned index) {return index<dm_raiders_weapon_count()?weapons[index].label:"";}
+unsigned dm_raiders_weapon_get(void) {return atomic_load(&g_weapon);}
+void dm_raiders_weapon_set(unsigned index) {
+    if(index<dm_raiders_weapon_count() && dm_raiders_mods_available())atomic_store(&g_weapon,index);
 }
 static int read64(uint64_t p,uint64_t *out) {
     if(!dm_guest_heap_readable(p,8))return 0;
@@ -85,6 +108,39 @@ static int player_valid(uint64_t player,uint32_t key) {
     if(!dm_guest_heap_readable(player,0x1400))return 0;
     memcpy(&vt,(const void *)player,8);memcpy(&slot,(const void *)(player+0xd0),4);
     return vt==(uint64_t)(g_main+0x4b1f698) && (slot^key)==0;
+}
+static void weapon_update(uint64_t player) {
+    uint64_t manager,slot,vt;uint32_t kind;
+    unsigned desired=atomic_load(&g_weapon);
+    if(!desired && !g_weapon_player)return;
+    if(!read64(player+0x13e0,&manager) || !dm_guest_heap_readable(manager,0x480) ||
+       !read64(manager,&vt) || vt!=(uint64_t)(g_main+0x4a5cef8) ||
+       !read64(manager+0x130,&slot))return;
+    if(g_weapon_player!=player || g_weapon_manager!=manager) {
+        if(!dm_guest_heap_readable(slot,0x20))return;
+        memcpy(&kind,(void *)(slot+0x10),4);if(kind!=1)return;
+        // Slot 1 is the main weapon. The game's equip request stores its
+        // numeric weapon enum at +14 and variation at +18 in the active resource slot.
+        memcpy(&g_weapon_original,(void *)(slot+0x14),4);
+        memcpy(&g_weapon_original_variant,(void *)(slot+0x18),4);
+        g_weapon_player=player;g_weapon_manager=manager;g_weapon_applied=0;
+    }
+    if(desired==g_weapon_applied) {
+        // Once restoration has finished, a later override must capture the
+        // game's current loadout, including changes made through its own UI.
+        if(!desired && dm_guest_heap_readable(slot,0x20)) {
+            uint32_t id;memcpy(&id,(void *)(slot+0x14),4);
+            if(id==g_weapon_original) {g_weapon_player=0;g_weapon_manager=0;}
+        }
+        return;
+    }
+    uint32_t id=desired?weapons[desired].id:g_weapon_original;
+    // Same request path as PlayerNetEvent 6c2b6a00 -> 2406910. This retires
+    // the current action and requests its replacement through the game.
+    // It runs on the player's update thread, never the Cocoa menu thread.
+    g_equip(player+0x11c4,manager,player+0x518,manager,1,id,desired?0:g_weapon_original_variant,1);
+    g_weapon_applied=desired;
+    if(g_diagnostics)LOG("Raiders weapon request: %s (%08x)",desired?weapons[desired].row:"game loadout",id);
 }
 static void ink(const uint64_t *regs) {
     if(!dm_raiders_mods_available() || !(atomic_load(&g_mods)&DM_RAIDERS_INFINITE_INK))return;
@@ -152,12 +208,19 @@ static int camera_basis(uint64_t player,float right[3],float forward[3]) {
     return 1;
 }
 static void flight(const uint64_t *regs) {
-    if(!dm_raiders_mods_available() || !(atomic_load(&g_mods)&DM_RAIDERS_FLY)) {
-        g_fly_player=0;g_fly_body=0;g_fly_time=0;g_report_time=0;return;
-    }
+    if(!dm_raiders_mods_available())return;
+    unsigned flags=atomic_load(&g_mods);
+    uint64_t buttons;int32_t lx,ly;dm_input_current(&buttons,&lx,&ly);
+    unsigned mode=(flags&DM_RAIDERS_FLY)?1:((flags&DM_RAIDERS_SWIM) && (buttons&DM_BTN_ZL)?2:0);
     uint64_t player=regs[28]-0x5d8,collision,owner,back,wrapper,character,shape,bodies[4];uint32_t key;
-    if(!scalar_key(&key) || !player_valid(player,key) ||
-       !read64(player+0x1240,&collision) || !dm_guest_heap_readable(collision,0x7440) ||
+    if(!scalar_key(&key) || !player_valid(player,key))return;
+    atomic_store(&g_player,player);
+    if(flags&DM_RAIDERS_INFINITE_INK)refill(player,key);
+    weapon_update(player);
+    if(!mode) {
+        g_fly_player=0;g_fly_body=0;g_fly_time=0;g_report_time=0;g_fly_mode=0;return;
+    }
+    if(!read64(player+0x1240,&collision) || !dm_guest_heap_readable(collision,0x7440) ||
        !read64(collision+0x7428,&owner) || !read64(owner+0x108,&back) || back!=player ||
        !read64(collision+0x7438,&wrapper) || !read64(wrapper+8,&character) ||
        !read64(character+0x20,bodies) || !read64(collision+0x28,&shape) || !dm_guest_heap_readable(shape,0x2e8)) {
@@ -168,12 +231,11 @@ static void flight(const uint64_t *regs) {
     for(int i=1;i<4;i++)if(!read64(collision+0x7280+(i-1)*8,bodies+i))return;
     for(int i=0;i<4;i++)if(!dm_guest_heap_readable(bodies[i],0x110))return;
     uint64_t tick=now_ns();
-    if(g_fly_player!=player || g_fly_body!=bodies[0]) {
+    if(g_fly_player!=player || g_fly_body!=bodies[0] || g_fly_mode!=mode) {
         memcpy(g_fly_position,(void *)(player+0x10),sizeof g_fly_position);
-        g_fly_player=player;g_fly_body=bodies[0];g_fly_time=tick;
+        g_fly_player=player;g_fly_body=bodies[0];g_fly_time=tick;g_fly_mode=mode;
     }
     float dt=fminf((tick-g_fly_time)*1e-9,0.05);g_fly_time=tick;
-    uint64_t buttons;int32_t lx,ly;dm_input_current(&buttons,&lx,&ly);
     float right[3],forward[3],v[3];
     if(!camera_basis(player,right,forward))return;
     float x=lx/32767.f,y=ly/32767.f;
@@ -195,7 +257,7 @@ static void flight(const uint64_t *regs) {
     memcpy(g_fly_position,next,12);
     if(g_diagnostics && tick-g_report_time>=1000000000ull) {
         g_report_time=tick;
-        LOG("Raiders flight: position %.3f %.3f %.3f, input %.2f %.2f %.2f",next[0],next[1],next[2],v[0],v[1],v[2]);
+        LOG("Raiders %s: position %.3f %.3f %.3f, input %.2f %.2f %.2f",mode==2?"swim":"flight",next[0],next[1],next[2],v[0],v[1],v[2]);
     }
 }
 __attribute__((constructor))static void register_mods(void) {

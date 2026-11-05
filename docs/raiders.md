@@ -2,7 +2,7 @@
 
 The development profile is `0400380020056000`, using update `v65536`, SDK 21.4.4, and NVN 231.39. Module IDs are recorded in `dm/games/0400380020056000/game.tsv`. The base build is identified, but runtime testing uses the update.
 
-The tested route covers native boot, menus, character creation, save reload, the airship conversations, and the first island. Virtual motion input completes the aiming tutorial, walking collects the first shard, and firing paints the ground. These checks also passed in the packaged app with an isolated save. The local package currently contains 1,434 translated shader programs. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes.
+The tested route covers native boot, menus, character creation, save reload, the airship conversations, and the first island. Virtual motion input completes the aiming tutorial, walking collects the first shard, and firing paints the ground. These checks also passed in the packaged app with an isolated save. The local package currently contains 1,853 translated shader programs. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes.
 
 The renderer fixes the opening scene's black output, swapped half-texture components, missing player skin, and command-list corruption. A later black-frame failure was traced to a full conditional-render table: dropped timestamp reports let repeated clears erase the scene. Dynamic report tracking fixes that reproduced failure. Other terrain differences and later areas still need checking against console output. Audio produces nonzero output, but listening and synchronization checks remain incomplete.
 
@@ -26,11 +26,15 @@ The v65536 hooks mute the final volume of eight music groups: background, scene-
 
 ## Mods
 
-Open **Mods** in the macOS menu bar while the game is active. The menu contains Player Flight / Noclip (Command-Shift-F), Infinite Ink (Command-Shift-I), Rapid Fire (Command-Shift-R), Disable All Mods (Command-Shift-0), and Mod Controls. Mods start disabled unless explicitly requested through `DM_RAIDERS_MODS=ink,rapid,fly`.
+Open **Mods** in the macOS menu bar while the game is active. The menu contains Player Flight / Noclip (Command-Shift-F), Swim Everywhere (Command-Shift-S), Infinite Ink (Command-Shift-I), Rapid Fire (Command-Shift-R), Weapon Switcher, Disable All Mods (Command-Shift-0), and Mod Controls. Mods start disabled unless explicitly requested through `DM_RAIDERS_MODS=ink,rapid,fly,swim`.
 
 Flight moves the player relative to the live camera: forward follows both its yaw and pitch, and sideways follows its right vector. R ascends, L descends, and left-stick click boosts. Mouse gyro and the right stick control the camera while flying. Default keys are WASD, U/E for ascent/descent, F for boost, and IJKL for camera movement. Disabling flight returns movement to the game. Infinite Ink refills both reserves; Rapid Fire removes the shooter's repeat delay in its active firing check. Other weapon types are not covered by the rapid-fire hook.
 
-The hooks require the exact v65536 main build and verify the local player's ownership and object types before writing. Rebuild the patched main module after updating the host; the menu stays disabled if any of the four required mod observation gates are absent. These are experimental gameplay modifications; later scenes and all weapons have not been tested. Flight bypasses physical movement constraints, but damage volumes and story triggers remain active, including below the ground. It does not grant invulnerability.
+Swim Everywhere uses the same camera-relative movement while holding ZL (Q or the captured right mouse button). It permits movement over dry ground and through the air; R/L and left-stick click still control height and boost. Releasing ZL restores normal movement. Flight takes priority when both toggles are enabled. The game still controls its transformation animation and tutorial restrictions.
+
+Weapon Switcher lists 122 main-weapon variants from this build’s RSDB, matched to the executable’s numeric weapon enum. An isolated first-island sweep loaded all 122 and captured 384 additional shader programs; swim and ink-effect checks added another 35. Requests run through the game’s equipment path on the player update thread. **Game Loadout**, or **Disable All Mods**, restores the weapon held before the override for that player. `DM_RAIDERS_WEAPON=Blaster_A` requests an initial override by RSDB row name. Weapon assets load asynchronously; this is a runtime override, not an inventory unlock.
+
+The hooks require the exact v65536 main build and verify the local player's ownership and object types before writing. Rebuild the patched main module after updating the host; the menu stays disabled if any of the four required mod observation gates are absent. All 122 variants passed an equipment-load sweep in the first island; full combat behavior for every variant and later scenes remain unverified. Flight bypasses physical movement constraints, but damage volumes and story triggers remain active, including below the ground. It does not grant invulnerability.
 
 ## Experimental ray tracing
 

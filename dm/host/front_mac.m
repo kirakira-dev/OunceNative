@@ -235,12 +235,14 @@ static NSMenuItem *menu_item(NSString *title, SEL sel, NSString *key, NSEventMod
 - (void)raidersMod:(NSMenuItem *)item {
     unsigned bit=[item.representedObject unsignedIntValue];
     dm_raiders_mods_set(bit ? dm_raiders_mods_get()^bit : 0);
+    if(!bit)dm_raiders_weapon_set(0);
 }
+- (void)raidersWeapon:(NSMenuItem *)item { dm_raiders_weapon_set([item.representedObject unsignedIntValue]); }
 - (void)raidersHelp:(id)sender {
     (void)sender;
     mouse_capture(0);
     NSAlert *a=[NSAlert new];a.messageText=@"Raiders Mods";
-    a.informativeText=@"Player Flight / Noclip\nLeft stick: fly relative to the camera, including its pitch\nR / L: ascend / descend\nLeft-stick click: move faster\n\nClick the game to capture the mouse for gyro aiming. Move the mouse to look, left-click to fire, and right-click to swim. Escape releases the mouse; Command-Shift-M toggles capture.\n\nDefault keys: WASD to fly, U / E up / down, F to boost, IJKL to look. Rebindings in Settings also apply.\n\nInfinite Ink keeps both ink reserves full. Rapid Fire removes the shooter's repeat delay while firing. Disable All Mods restores normal movement and weapon behavior. Mods start disabled on each launch.";
+    a.informativeText=@"Player Flight / Noclip\nLeft stick: fly relative to the camera, including its pitch\nR / L: ascend / descend\nLeft-stick click: move faster\n\nClick the game to capture the mouse for gyro aiming. Move the mouse to look, left-click to fire, and right-click to swim. Escape releases the mouse; Command-Shift-M toggles capture.\n\nDefault keys: WASD to fly, U / E up / down, F to boost, IJKL to look. Rebindings in Settings also apply.\n\nSwim Everywhere (Command-Shift-S)\nHold ZL / Q / captured right mouse to swim on dry surfaces or through the air. Use the same camera-relative movement, ascent, descent and boost controls as flight. Release ZL to return to normal movement.\n\nWeapon Switcher\nSelect a family and variant in the Mods menu. Game Loadout restores the weapon held before the override.\n\nInfinite Ink keeps both ink reserves full. Rapid Fire removes the shooter's repeat delay while firing. Disable All Mods restores normal movement and weapon behavior. Mods start disabled on each launch.";
     [a addButtonWithTitle:@"OK"];[a runModal];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
@@ -248,6 +250,10 @@ static NSMenuItem *menu_item(NSString *title, SEL sel, NSString *key, NSEventMod
     if(item.action==@selector(raidersMod:)) {
         unsigned bit=[item.representedObject unsignedIntValue];
         item.state=bit && (dm_raiders_mods_get()&bit) ? NSControlStateValueOn : NSControlStateValueOff;
+        return dm_raiders_mods_available();
+    }
+    if(item.action==@selector(raidersWeapon:)) {
+        item.state=[item.representedObject unsignedIntValue]==dm_raiders_weapon_get()?NSControlStateValueOn:NSControlStateValueOff;
         return dm_raiders_mods_available();
     }
     return YES;
@@ -274,14 +280,31 @@ static void build_menus(NSString *name) {
     NSMenuItem *vi = [NSMenuItem new]; vi.submenu = view; [bar addItem:vi];
     if(DM_GAME_PROGRAM_ID==0x0400380020056000ull) {
         NSMenu *mods=[[NSMenu alloc] initWithTitle:@"Mods"];
-        NSArray *labels=@[@"Player Flight / Noclip",@"Infinite Ink",@"Rapid Fire",@"Disable All Mods"];
-        NSArray *keys=@[@"f",@"i",@"r",@"0"];
-        unsigned bits[]={DM_RAIDERS_FLY,DM_RAIDERS_INFINITE_INK,DM_RAIDERS_RAPID_FIRE,0};
-        for(unsigned i=0;i<4;i++) {
-            if(i==3)[mods addItem:NSMenuItem.separatorItem];
+        NSArray *labels=@[@"Player Flight / Noclip",@"Swim Everywhere",@"Infinite Ink",@"Rapid Fire",@"Disable All Mods"];
+        NSArray *keys=@[@"f",@"s",@"i",@"r",@"0"];
+        unsigned bits[]={DM_RAIDERS_FLY,DM_RAIDERS_SWIM,DM_RAIDERS_INFINITE_INK,DM_RAIDERS_RAPID_FIRE,0};
+        for(unsigned i=0;i<5;i++) {
+            if(i==4)[mods addItem:NSMenuItem.separatorItem];
             NSMenuItem *item=menu_item(labels[i],@selector(raidersMod:),keys[i],NSEventModifierFlagCommand|NSEventModifierFlagShift,t);
             item.representedObject=@(bits[i]);[mods addItem:item];
         }
+        NSMenu *weapons=[[NSMenu alloc] initWithTitle:@"Weapon Switcher"];
+        NSMutableDictionary<NSString *,NSMenu *> *families=[NSMutableDictionary new];
+        for(unsigned i=0;i<dm_raiders_weapon_count();i++) {
+            NSString *family=[NSString stringWithUTF8String:dm_raiders_weapon_family(i)];
+            NSMenu *group=weapons;
+            if(family.length) {
+                group=families[family];
+                if(!group) {
+                    group=[[NSMenu alloc] initWithTitle:family];families[family]=group;
+                    NSMenuItem *item=[NSMenuItem new];item.title=family;item.submenu=group;[weapons addItem:item];
+                }
+            }
+            NSMenuItem *item=menu_item([NSString stringWithUTF8String:dm_raiders_weapon_label(i)],@selector(raidersWeapon:),@"",0,t);
+            item.representedObject=@(i);[group addItem:item];
+            if(!i)[weapons addItem:NSMenuItem.separatorItem];
+        }
+        NSMenuItem *wi=[NSMenuItem new];wi.title=@"Weapon Switcher";wi.submenu=weapons;[mods insertItem:wi atIndex:4];
         [mods addItem:NSMenuItem.separatorItem];
         [mods addItem:menu_item(@"Mod Controls…",@selector(raidersHelp:),@"",0,t)];
         NSMenuItem *mi=[NSMenuItem new];mi.submenu=mods;[bar addItem:mi];

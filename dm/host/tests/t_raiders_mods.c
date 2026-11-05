@@ -9,6 +9,13 @@ static uint64_t tick=1000000000,buttons;
 static int32_t axis_x,axis_y;
 static unsigned positions,velocities;
 static float last_body[4][3];
+static unsigned equip_count,equip_id,equip_variant;
+static void equip(uint64_t event,uint64_t manager,uint64_t actor,uint64_t manager2,unsigned kind,uint32_t id,unsigned variant,unsigned replace) {
+    assert(event==(uintptr_t)(heap+0x1000+0x11c4));
+    assert(actor==(uintptr_t)(heap+0x1000+0x518));
+    assert(manager==manager2 && manager==(uintptr_t)(heap+0x15000));
+    assert(kind==1 && replace==1);equip_count++;equip_id=id;equip_variant=variant;
+}
 uint64_t now_ns(void) { return tick; }
 void dm_input_current(uint64_t *b,int32_t *x,int32_t *y) { *b=buttons;*x=axis_x;*y=axis_y; }
 static float radius(uint64_t c) { (void)c;return 1.0f; }
@@ -107,5 +114,35 @@ int main(int argc,char **argv) {
     assert(!memcmp(before,heap,sizeof heap)&&writes==n&&positions==calls);
     dm_raiders_mods_set(DM_RAIDERS_FLY);put32(p+0xd0,key^1);callbacks[OBS_RAIDERS_MOVE](regs);assert(positions==calls);
     put32(p+0xd0,key);put64(owner+0x108,0);callbacks[OBS_RAIDERS_MOVE](regs);assert(positions==calls);
-    free(image);puts("Raiders mods: ink, rapid fire, flight, disable, ownership and build guards pass");return 0;
+    put64(owner+0x108,(uintptr_t)p);
+    dm_raiders_mods_set(DM_RAIDERS_SWIM);buttons=0;calls=positions;
+    callbacks[OBS_RAIDERS_MOVE](regs);assert(positions==calls && !g_fly_player);
+    buttons=DM_BTN_ZL|DM_BTN_R;axis_x=axis_y=0;
+    callbacks[OBS_RAIDERS_MOVE](regs);float y_before=last_body[1][1];
+    tick+=50000000;callbacks[OBS_RAIDERS_MOVE](regs);
+    assert(g_fly_mode==2 && fabsf(last_body[1][1]-y_before-.3f)<.0001f);
+    filtered=buttons|DM_BTN_LS;fx=123;fy=-456;dm_raiders_mods_filter_input(&filtered,&fx,&fy);
+    assert(filtered==DM_BTN_ZL && fx==123 && fy==-456);
+    buttons=0;calls=positions;callbacks[OBS_RAIDERS_MOVE](regs);assert(positions==calls && !g_fly_player);
+    filtered=DM_BTN_R;dm_raiders_mods_filter_input(&filtered,&fx,&fy);assert(filtered==DM_BTN_R);
+    dm_raiders_mods_set(0);g_equip=equip;
+    uint8_t *manager=heap+0x15000,*slot=heap+0x16000;
+    put64(p+0x13e0,(uintptr_t)manager);put64(manager,(uintptr_t)(image+0x4a5cef8));
+    put64(manager+0x130,(uintptr_t)slot);put32(slot+0x10,1);put32(slot+0x14,0x12345678);put32(slot+0x18,3);
+    assert(dm_raiders_weapon_count()>10);assert(!strcmp(dm_raiders_weapon_label(0),"Game Loadout"));
+    dm_raiders_weapon_set(dm_raiders_weapon_count());assert(!dm_raiders_weapon_get());
+    dm_raiders_weapon_set(1);callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==1 && equip_id==weapons[1].id && equip_variant==0);
+    callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==1);
+    dm_raiders_weapon_set(2);put32(p+0xd0,key^1);callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==1);
+    put32(p+0xd0,key);put64(manager,(uintptr_t)(image+0x123));callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==1);
+    put64(manager,(uintptr_t)(image+0x4a5cef8));callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==2 && equip_id==weapons[2].id);
+    put64(manager+0x130,0); // A retiring/loading slot must not prevent restoration.
+    dm_raiders_weapon_set(0);callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==3 && equip_id==0x12345678 && equip_variant==3);
+    callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==3);
+    put64(manager+0x130,(uintptr_t)slot);callbacks[OBS_RAIDERS_MOVE](regs);
+    assert(!g_weapon_player && !g_weapon_manager);
+    put32(slot+0x14,7);put32(slot+0x18,0);
+    dm_raiders_weapon_set(1);callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==4);
+    dm_raiders_weapon_set(0);callbacks[OBS_RAIDERS_MOVE](regs);assert(equip_count==5 && equip_id==7 && !equip_variant);
+    free(image);puts("Raiders mods: ink, rapid fire, flight, swimming, weapon requests/restoration, ownership and build guards pass");return 0;
 }
