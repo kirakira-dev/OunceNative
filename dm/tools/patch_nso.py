@@ -224,6 +224,7 @@ OBS = {
   '663c2e087a083f05307f229dfc4042d5': [
     (0x23f2980, 21, 'd1185008', 'Raiders ink-consumption entry: x0 = player logic + 0x614; orig sub x8,x0,#0x614'),
     (0x25099f8, 22, 'f9401e68', 'Raiders shooter update after repeat timer: x19 = PlayerInkActionShooter; orig ldr x8,[x19,#0x38]'),
+    (0x250bfa0, 26, 'd503237f', 'Raiders active shooter readiness entry: x0 = PlayerInkActionShooter; orig pacibsp'),
     (0x22ec3a4, 23, 'a95b4ff4', 'Raiders movement completion: x28 = player logic + 0x5d8; orig ldp x20,x19,[sp,#0x1b0]'),
     (0x35c88f0, 24, 'd503237f', 'Raiders sound-group update entry: x0 = group; orig pacibsp'),
     (0x3537748, 25, 'f10022b5', 'Raiders sound-group update returned: x20 = group-array cursor; orig subs x21,x21,#8'),

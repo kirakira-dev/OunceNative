@@ -124,6 +124,10 @@ int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 @end
 static uint8_t g_down[128];   // keyboard state by macOS virtual key code
 static uint64_t g_pad_btn;
+static uint64_t g_mouse_btn;
+static int g_mouse_captured;
+static NSWindow *g_mouse_window;
+static NSPoint g_mouse_location;
 static int32_t g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -139,7 +143,7 @@ static int32_t clamp_axis(int32_t a, int32_t b) { int32_t v = a + b; return v > 
 static int held(int act) { uint16_t c = g_dmset_bind[act]; return c < 128 && g_down[c]; }
 static void push(void) {
     pthread_mutex_lock(&g_mu);
-    uint64_t b = g_pad_btn;
+    uint64_t b = g_pad_btn | g_mouse_btn;
     for (int i = 0; i < 16; i++) if (held(i)) b |= 1ull << i;   // the first 16 actions are the dm_input.h button bits
     int32_t lx = clamp_axis((held(DMB_LRIGHT) - held(DMB_LLEFT)) * 32767, g_pad_lx), ly = clamp_axis((held(DMB_LUP) - held(DMB_LDOWN)) * 32767, g_pad_ly);
     int32_t rx = clamp_axis((held(DMB_RRIGHT) - held(DMB_RLEFT)) * 32767, g_pad_rx), ry = clamp_axis((held(DMB_RUP) - held(DMB_RDOWN)) * 32767, g_pad_ry);
@@ -184,7 +188,40 @@ static void on_flags(NSEvent *e) {   // a modifier key bound on its own (Shift /
     g_down[e.keyCode] = (e.modifierFlags & m) != 0;
     push();
 }
-static void release_keys(void) { memset(g_down, 0, sizeof g_down); push(); }   // focus lost: a key released elsewhere sends no key up here
+static void release_keys(void) {
+    memset(g_down, 0, sizeof g_down);
+    pthread_mutex_lock(&g_mu);g_mouse_btn=0;pthread_mutex_unlock(&g_mu);push();
+}   // focus lost: a key released elsewhere sends no key up here
+static void mouse_capture(int capture) {
+    capture=!!capture;
+    if(capture==g_mouse_captured)return;
+    if(capture) {
+        if(!g_mouse_window.keyWindow || !NSApp.active)return;
+        if(CGAssociateMouseAndMouseCursorPosition(false)!=kCGErrorSuccess) { LOG("mouse capture unavailable");return; }
+        g_mouse_location=g_mouse_window.mouseLocationOutsideOfEventStream;
+        [NSCursor hide];
+    } else {
+        CGAssociateMouseAndMouseCursorPosition(true);[NSCursor unhide];
+    }
+    g_mouse_captured=capture;release_keys();
+    LOG("mouse gyro aim %s",capture?"captured (Escape releases)":"released");
+}
+static void mouse_button(uint64_t button,int down) {
+    pthread_mutex_lock(&g_mu);
+    if(down)g_mouse_btn|=button;else g_mouse_btn&=~button;
+    pthread_mutex_unlock(&g_mu);push();
+}
+static void mouse_motion(NSEvent *e) {
+    CGFloat dx=e.deltaX,dy=e.deltaY;
+    NSPoint location=e.locationInWindow;
+    // Remote and accessibility pointers can supply positions without device
+    // deltas. A captured physical pointer normally stays at one position.
+    if(g_mouse_captured && dx==0 && dy==0) {
+        dx=location.x-g_mouse_location.x;dy=g_mouse_location.y-location.y;
+    }
+    g_mouse_location=location;
+    dm_motion_rotate((float)dy*.003f,(float)dx*.003f);
+}
 
 static NSMenuItem *menu_item(NSString *title, SEL sel, NSString *key, NSEventModifierFlags mods, id target) {
     NSMenuItem *i = [[NSMenuItem alloc] initWithTitle:title action:sel keyEquivalent:key];
@@ -193,18 +230,21 @@ static NSMenuItem *menu_item(NSString *title, SEL sel, NSString *key, NSEventMod
 @interface DmMenuTarget : NSObject
 @end
 @implementation DmMenuTarget
-- (void)settings:(id)s { (void)s; dmset_show(); }
+- (void)settings:(id)s { (void)s; mouse_capture(0);dmset_show(); }
+- (void)mouseAim:(id)s { (void)s;mouse_capture(!g_mouse_captured); }
 - (void)raidersMod:(NSMenuItem *)item {
     unsigned bit=[item.representedObject unsignedIntValue];
     dm_raiders_mods_set(bit ? dm_raiders_mods_get()^bit : 0);
 }
 - (void)raidersHelp:(id)sender {
     (void)sender;
+    mouse_capture(0);
     NSAlert *a=[NSAlert new];a.messageText=@"Raiders Mods";
-    a.informativeText=@"Player Flight / Noclip\nLeft stick: move along the world's horizontal axes\nR / L: ascend / descend\nLeft-stick click: move faster\nRight stick: look around\n\nDefault keyboard controls: WASD to move, U / E up / down, F to boost, IJKL to look. Rebindings in Settings also apply.\n\nInfinite Ink keeps both ink reserves full. Rapid Fire removes the shooter's repeat delay. Disable All Mods restores normal movement and weapon behavior. Mods start disabled on each launch.";
+    a.informativeText=@"Player Flight / Noclip\nLeft stick: fly relative to the camera, including its pitch\nR / L: ascend / descend\nLeft-stick click: move faster\n\nClick the game to capture the mouse for gyro aiming. Move the mouse to look, left-click to fire, and right-click to swim. Escape releases the mouse; Command-Shift-M toggles capture.\n\nDefault keys: WASD to fly, U / E up / down, F to boost, IJKL to look. Rebindings in Settings also apply.\n\nInfinite Ink keeps both ink reserves full. Rapid Fire removes the shooter's repeat delay while firing. Disable All Mods restores normal movement and weapon behavior. Mods start disabled on each launch.";
     [a addButtonWithTitle:@"OK"];[a runModal];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if(item.action==@selector(mouseAim:)) {item.state=g_mouse_captured?NSControlStateValueOn:NSControlStateValueOff;return YES;}
     if(item.action==@selector(raidersMod:)) {
         unsigned bit=[item.representedObject unsignedIntValue];
         item.state=bit && (dm_raiders_mods_get()&bit) ? NSControlStateValueOn : NSControlStateValueOff;
@@ -229,6 +269,8 @@ static void build_menus(NSString *name) {
     NSMenuItem *ai = [NSMenuItem new]; ai.submenu = app; [bar addItem:ai];
     NSMenu *view = [[NSMenu alloc] initWithTitle:@"View"];
     [view addItem:menu_item(@"Enter Full Screen", @selector(toggleFullScreen:), @"f", NSEventModifierFlagCommand | NSEventModifierFlagControl, nil)];
+    if(DM_GAME_PROGRAM_ID==0x0400380020056000ull)
+        [view addItem:menu_item(@"Capture Mouse for Gyro Aim",@selector(mouseAim:),@"m",NSEventModifierFlagCommand|NSEventModifierFlagShift,t)];
     NSMenuItem *vi = [NSMenuItem new]; vi.submenu = view; [bar addItem:vi];
     if(DM_GAME_PROGRAM_ID==0x0400380020056000ull) {
         NSMenu *mods=[[NSMenu alloc] initWithTitle:@"Mods"];
@@ -272,6 +314,7 @@ void front_run(void (*guest)(void)) {
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
         DmGameView *v = [[DmGameView alloc] initWithFrame:r];
         win.contentView = v;
+        g_mouse_window=win;win.acceptsMouseMovedEvents=YES;
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
@@ -290,6 +333,7 @@ void front_run(void (*guest)(void)) {
         [NSApp activateIgnoringOtherApps:YES];
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
+            if(g_mouse_captured && e.keyCode==53) {if(e.type==NSEventTypeKeyDown)mouse_capture(0);return nil;}
             if (e.modifierFlags & NSEventModifierFlagCommand) { if (e.type == NSEventTypeKeyDown) release_keys(); return e; }   // ⌘ shortcuts go to the menus
             if ((e.modifierFlags & NSEventModifierFlagOption) && e.keyCode >= 123 && e.keyCode <= 126) {
                 if (e.type == NSEventTypeKeyDown) {
@@ -306,6 +350,17 @@ void front_run(void (*guest)(void)) {
         // Mouse as a single-point touchscreen (for testing touch on the local machine, front.h dm_touch_set): left button down / drag = finger 0 at the normalized coordinates, release = lifted
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;
+            if(DM_GAME_PROGRAM_ID==0x0400380020056000ull) {
+                if(!g_mouse_captured) {
+                    NSPoint p=[v convertPoint:e.locationInWindow fromView:nil];
+                    if(e.type==NSEventTypeLeftMouseDown && NSPointInRect(p,v.bounds)) {mouse_capture(1);return nil;}
+                    return e;
+                }
+                if(e.type==NSEventTypeLeftMouseDown)mouse_button(DM_BTN_ZR,1);
+                if(e.type==NSEventTypeLeftMouseUp)mouse_button(DM_BTN_ZR,0);
+                if(e.type==NSEventTypeLeftMouseDragged)mouse_motion(e);
+                return nil;
+            }
             if (e.type == NSEventTypeLeftMouseUp) { dm_touch_set(NULL, 0); return nil; }
             NSPoint p = [v convertPoint:e.locationInWindow fromView:nil]; NSSize sz = v.bounds.size;
             if (sz.width <= 0 || sz.height <= 0) return e;
@@ -313,8 +368,16 @@ void front_run(void (*guest)(void)) {
             dm_touch_set(&t, 1); return nil;
         }];
         GCController.shouldMonitorBackgroundEvents = NO;
-        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskRightMouseDragged handler:^NSEvent *(NSEvent *e) {
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved | NSEventMaskRightMouseDown | NSEventMaskRightMouseDragged | NSEventMaskRightMouseUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;
+            if(g_mouse_captured) {
+                if(e.type==NSEventTypeRightMouseDown)mouse_button(DM_BTN_ZL,1);
+                if(e.type==NSEventTypeRightMouseUp)mouse_button(DM_BTN_ZL,0);
+                if(e.type==NSEventTypeMouseMoved || e.type==NSEventTypeRightMouseDragged)
+                    mouse_motion(e);
+                return nil;
+            }
+            if(e.type!=NSEventTypeRightMouseDragged)return e;
             dm_motion_rotate((float)e.deltaY * 0.003f, (float)e.deltaX * 0.003f);
             return nil;
         }];
@@ -322,13 +385,14 @@ void front_run(void (*guest)(void)) {
         [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; pads_changed(); }];
         pads_changed();
         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:win queue:nil
-                                                      usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
+                                                      usingBlock:^(NSNotification *n) { (void)n;mouse_capture(0);exit(0); }];
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1)
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+        [nc addObserverForName:NSApplicationWillTerminateNotification object:NSApp queue:nil usingBlock:^(NSNotification *n) { (void)n;mouse_capture(0); }];
         [nc addObserverForName:NSApplicationDidBecomeActiveNotification object:NSApp queue:nil usingBlock:^(NSNotification *n) { (void)n; LOG("Mac app became active"); }];
-        [nc addObserverForName:NSApplicationDidResignActiveNotification object:NSApp queue:nil usingBlock:^(NSNotification *n) { (void)n; LOG("Mac app resigned active"); }];
+        [nc addObserverForName:NSApplicationDidResignActiveNotification object:NSApp queue:nil usingBlock:^(NSNotification *n) { (void)n;mouse_capture(0);LOG("Mac app resigned active"); }];
         LOG("Mac app active after window setup: %d", NSApp.active);
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; release_keys(); if (!win.miniaturized) dm_focus_set(2); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n;mouse_capture(0);release_keys(); if (!win.miniaturized) dm_focus_set(2); }];
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];

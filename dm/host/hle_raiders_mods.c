@@ -18,6 +18,9 @@ static uint64_t g_fly_player,g_fly_body,g_fly_time;
 static float g_fly_position[3];
 static int g_diagnostics;
 static uint64_t g_report_time;
+static uint64_t g_shot_player,g_shot_time;
+static unsigned g_shot_count,g_shot_checks;
+static uint32_t g_shot_sequence;
 int dm_guest_heap_readable(uint64_t address,size_t length);
 
 static void init(void) {
@@ -41,7 +44,8 @@ static void init(void) {
 int dm_raiders_mods_available(void) {
     // Menus can be constructed before modules are loaded; do not latch that
     // temporary absence into pthread_once.
-    if(!g_nmod || !gate_obs_present(OBS_RAIDERS_INK) || !gate_obs_present(OBS_RAIDERS_SHOOTER) || !gate_obs_present(OBS_RAIDERS_MOVE))return 0;
+    if(!g_nmod || !gate_obs_present(OBS_RAIDERS_INK) || !gate_obs_present(OBS_RAIDERS_SHOOTER) ||
+       !gate_obs_present(OBS_RAIDERS_MOVE) || !gate_obs_present(OBS_RAIDERS_SHOOT_READY))return 0;
     pthread_once(&g_once,init);
     return g_main!=NULL;
 }
@@ -88,21 +92,64 @@ static void ink(const uint64_t *regs) {
     if(p!=atomic_load(&g_player) || !scalar_key(&key) || !player_valid(p,key))return;
     refill(p,key);
 }
+static int shooter_owner(uint64_t s,uint64_t *player,uint32_t *key) {
+    uint64_t owner;
+    if(!dm_guest_heap_readable(s,0x2e0) || !read64(s+0x2b0,&owner) || !read64(owner+0x108,player) ||
+       !scalar_key(key) || !player_valid(*player,*key))return 0;
+    uint64_t vt;memcpy(&vt,(void *)s,8);
+    return vt==(uint64_t)(g_main+0x4b24de8);
+}
 static void shooter(const uint64_t *regs) {
     if(!dm_raiders_mods_available())return;
-    uint64_t s=regs[19],owner,player;uint32_t key;
-    if(!dm_guest_heap_readable(s,0x2e0) || !read64(s+0x2b0,&owner) || !read64(owner+0x108,&player) ||
-       !scalar_key(&key) || !player_valid(player,key))return;
-    uint64_t vt;memcpy(&vt,(void *)s,8);
-    if(vt!=(uint64_t)(g_main+0x4b24de8))return;
+    uint64_t player;uint32_t key;
+    if(!shooter_owner(regs[19],&player,&key))return;
+    atomic_store(&g_player,player);
+    if(atomic_load(&g_mods)&DM_RAIDERS_INFINITE_INK)refill(player,key);
+}
+static void shoot_ready(const uint64_t *regs) {
+    if(!dm_raiders_mods_available())return;
+    uint64_t s=regs[0],player;uint32_t key;
+    if(!shooter_owner(s,&player,&key))return;
     atomic_store(&g_player,player);
     unsigned flags=atomic_load(&g_mods);
     if(flags&DM_RAIDERS_INFINITE_INK)refill(player,key);
     if(flags&DM_RAIDERS_RAPID_FIRE) {
-        // +68 is the encoded [0,1] repeat accumulator; +6c is its remaining
-        // frame count, produced by main+25093b0 immediately before this hook.
+        // main+250bfa0 checks this accumulator through +24de130 while firing.
+        // The old +25099f8 observation only runs on the non-firing branch.
+        // Keep the game's ink, weapon-state and projectile-creation checks.
         word(s+0x68,key^0x3f800000u);word(s+0x6c,0);
     }
+    if(g_diagnostics) {
+        // +98 counts emitted shots (+250a4fc..504). +91 is a repeating
+        // spread-pattern index and cannot be used as a shot counter.
+        uint64_t tick=now_ns();uint32_t sequence;memcpy(&sequence,(const void *)(s+0x98),4);
+        if(g_shot_player!=s || tick-g_shot_time>2000000000ull) {
+            g_shot_player=s;g_shot_sequence=sequence;g_shot_time=tick;g_shot_count=g_shot_checks=0;
+        }
+        g_shot_count+=sequence>=g_shot_sequence ? sequence-g_shot_sequence : sequence;
+        g_shot_sequence=sequence;g_shot_checks++;
+        if(tick-g_shot_time>=1000000000ull) {
+            LOG("Raiders firing: %u shots / %u readiness checks in %.3f s; rapid %u",g_shot_count,g_shot_checks,(tick-g_shot_time)*1e-9,!!(flags&DM_RAIDERS_RAPID_FIRE));
+            g_shot_count=g_shot_checks=0;g_shot_time=tick;
+        }
+    }
+}
+static int camera_basis(uint64_t player,float right[3],float forward[3]) {
+    uint64_t camera,vt;
+    // main+22e49a0 creates spl:PlayerCamera and stores it at player+1210.
+    // Its constructor (+245c7a0) initializes the world orientation at +3c.
+    if(!read64(player+0x1210,&camera) || !dm_guest_heap_readable(camera,0x94) ||
+       !read64(camera,&vt) || vt!=(uint64_t)(g_main+0x4b20300))return 0;
+    memcpy(right,(void *)(camera+0x3c),12);memcpy(forward,(void *)(camera+0x54),12);
+    float rr=0,ff=0,rf=0;
+    for(int i=0;i<3;i++) {
+        forward[i]=-forward[i];
+        if(!isfinite(right[i]) || !isfinite(forward[i]))return 0;
+        rr+=right[i]*right[i];ff+=forward[i]*forward[i];rf+=right[i]*forward[i];
+    }
+    if(rr<0.8f || rr>1.2f || ff<0.8f || ff>1.2f || fabsf(rf)>0.05f)return 0;
+    for(int i=0;i<3;i++) {right[i]/=sqrtf(rr);forward[i]/=sqrtf(ff);}
+    return 1;
 }
 static void flight(const uint64_t *regs) {
     if(!dm_raiders_mods_available() || !(atomic_load(&g_mods)&DM_RAIDERS_FLY)) {
@@ -127,8 +174,12 @@ static void flight(const uint64_t *regs) {
     }
     float dt=fminf((tick-g_fly_time)*1e-9,0.05);g_fly_time=tick;
     uint64_t buttons;int32_t lx,ly;dm_input_current(&buttons,&lx,&ly);
-    float v[3]={lx/32767.f,!!(buttons&DM_BTN_R)-!!(buttons&DM_BTN_L),-ly/32767.f};
-    if(fabsf(v[0])<0.15f)v[0]=0;if(fabsf(v[2])<0.15f)v[2]=0;
+    float right[3],forward[3],v[3];
+    if(!camera_basis(player,right,forward))return;
+    float x=lx/32767.f,y=ly/32767.f;
+    if(fabsf(x)<0.15f)x=0;if(fabsf(y)<0.15f)y=0;
+    for(int i=0;i<3;i++)v[i]=right[i]*x+forward[i]*y;
+    v[1]+=!!(buttons&DM_BTN_R)-!!(buttons&DM_BTN_L);
     float len=sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
     float step=6.f*dt*(buttons&DM_BTN_LS?3.f:1.f)/fmaxf(1.f,len);
     float next[3],center[3];float radius=g_collision_radius(collision);
@@ -149,5 +200,5 @@ static void flight(const uint64_t *regs) {
 }
 __attribute__((constructor))static void register_mods(void) {
     gate_obs_set(OBS_RAIDERS_INK,ink);gate_obs_set(OBS_RAIDERS_SHOOTER,shooter);
-    gate_obs_set(OBS_RAIDERS_MOVE,flight);
+    gate_obs_set(OBS_RAIDERS_MOVE,flight);gate_obs_set(OBS_RAIDERS_SHOOT_READY,shoot_ready);
 }

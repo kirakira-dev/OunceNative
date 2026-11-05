@@ -16,7 +16,7 @@ The equivalent environment settings are `DM_OUTPUT_RES=3840x2160`, `DM_SCENE_HEI
 
 ## Controls
 
-The default keyboard controls are WASD to move, IJKL for the right stick, Z to confirm, X to jump, O to fire, Q for ZL, and V for Y. Hold the right mouse button and drag to aim with virtual motion input. Option plus an arrow key adjusts the same motion input in small steps. Keyboard and controller button mappings are available in the app's settings with Command-comma. Physical controller motion sensors are not connected yet.
+The default keyboard controls are WASD to move, IJKL for the right stick, Z to confirm, X to jump, O to fire, Q for ZL, and V for Y. Click the game to capture the mouse for virtual gyro aiming, then move it to look, left-click to fire, and right-click to swim. Escape releases the pointer; Command-Shift-M toggles capture. Opening Settings or switching away also releases it. Without capture, right-button dragging still aims. Option plus an arrow key adjusts the same motion input in small steps. Keyboard and controller button mappings are available in the app's settings with Command-comma. Physical controller motion sensors are not connected yet.
 
 ## Music
 
@@ -28,9 +28,9 @@ The v65536 hooks mute the final volume of eight music groups: background, scene-
 
 Open **Mods** in the macOS menu bar while the game is active. The menu contains Player Flight / Noclip (Command-Shift-F), Infinite Ink (Command-Shift-I), Rapid Fire (Command-Shift-R), Disable All Mods (Command-Shift-0), and Mod Controls. Mods start disabled unless explicitly requested through `DM_RAIDERS_MODS=ink,rapid,fly`.
 
-Flight moves the player along world X/Z axes with the left stick, ascends with R, descends with L, and boosts with left-stick click. The right stick keeps controlling the camera. Default keys are WASD, U/E for ascent/descent, F for boost, and IJKL for camera movement. Disabling flight returns movement to the game. Infinite Ink refills both reserves; Rapid Fire removes the shooter's repeat delay. Other weapon types are not covered by the rapid-fire hook.
+Flight moves the player relative to the live camera: forward follows both its yaw and pitch, and sideways follows its right vector. R ascends, L descends, and left-stick click boosts. Mouse gyro and the right stick control the camera while flying. Default keys are WASD, U/E for ascent/descent, F for boost, and IJKL for camera movement. Disabling flight returns movement to the game. Infinite Ink refills both reserves; Rapid Fire removes the shooter's repeat delay in its active firing check. Other weapon types are not covered by the rapid-fire hook.
 
-The hooks require the exact v65536 main build and verify the local player's ownership and object types before writing. Rebuild the patched main module after updating the host; the menu stays disabled if the three required observation gates are absent. These are experimental gameplay modifications; later scenes and all weapons have not been tested. Flight bypasses physical movement constraints, but damage volumes and story triggers remain active, including below the ground. It does not grant invulnerability.
+The hooks require the exact v65536 main build and verify the local player's ownership and object types before writing. Rebuild the patched main module after updating the host; the menu stays disabled if any of the four required mod observation gates are absent. These are experimental gameplay modifications; later scenes and all weapons have not been tested. Flight bypasses physical movement constraints, but damage volumes and story triggers remain active, including below the ground. It does not grant invulnerability.
 
 ## Experimental ray tracing
 
