@@ -68,6 +68,9 @@ environment = {
 }
 if profile_id == '0400380020056000':
     environment['DM_SCENE_OVERLAY_ROOT'] = '${RESOURCES}/scene-resolution'
+    # The direct drawable path keeps presenting when macOS display-link
+    # callbacks pause; the layer still synchronizes presentation to vblank.
+    environment['DM_PRESENT_LINK'] = '0'
 info = {
     'CFBundleExecutable': 'dmhost',
     'CFBundleIdentifier': 'org.ouncenative.mac.' + profile_id.lower(),

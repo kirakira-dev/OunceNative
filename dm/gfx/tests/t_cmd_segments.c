@@ -9,9 +9,9 @@ int dm_guest_as_contains(uintptr_t address) { return 0; }
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 enum { LISTS = 1024 };
-static NVNcommandHandle record(NVNcommandBuffer *c, pool_t *pool, unsigned index, unsigned generation) {
+static NVNcommandHandle record_at(NVNcommandBuffer *c, pool_t *pool, unsigned index, unsigned generation, size_t offset) {
     h_nvnCommandBufferInitialize(c, NULL);
-    h_nvnCommandBufferAddCommandMemory(c, (NVNmemoryPool *)pool, index * 512, 512);
+    h_nvnCommandBufferAddCommandMemory(c, (NVNmemoryPool *)pool, offset, 512);
     h_nvnCommandBufferBeginRecording(c);
     for (unsigned push = 0; push < 3; push++) {
         uint32_t data[64];
@@ -20,6 +20,9 @@ static NVNcommandHandle record(NVNcommandBuffer *c, pool_t *pool, unsigned index
         memset(data, 0xa7, sizeof data);
     }
     return h_nvnCommandBufferEndRecording(c);
+}
+static NVNcommandHandle record(NVNcommandBuffer *c, pool_t *pool, unsigned index, unsigned generation) {
+    return record_at(c, pool, index, generation, index * 512);
 }
 static void verify(NVNcommandHandle handle, unsigned index, unsigned generation) {
     const uint8_t *p = (const uint8_t *)handle; unsigned pushes = 0, steps = 0;
@@ -103,6 +106,19 @@ int main(void) {
     CHECK(h_nvnCommandBufferGetCommandMemoryUsed(&c)==compact_size);
     CHECK(!memcmp(saved,(void *)adjacent,sizeof saved));
     printf("PASS compact re-recording preserves size and adjacent cached list\n");
+    // A minimum-size grant overlaps the next packed list, but the recording
+    // itself does not. Its overflow must remain alive when another list grows.
+    pool_t packed = {.mem=calloc(1,4096)};
+    NVNcommandHandle overflow_neighbor = record_at(&c,&packed,7,0,496);
+    h_nvnCommandBufferInitialize(&c,NULL);
+    h_nvnCommandBufferAddCommandMemory(&c,(NVNmemoryPool *)&packed,0,512);
+    h_nvnCommandBufferBeginRecording(&c);
+    for(unsigned i=0;i<30;i++)h_nvnCommandBufferSetPatchSize(&c,i+1);
+    h_nvnCommandBufferEndRecording(&c);
+    CHECK(h_nvnCommandBufferGetCommandMemoryUsed(&c)==496);
+    record(&c,&packed,3,1);
+    verify(overflow_neighbor,7,0);
+    printf("PASS overlapping unused grant preserves a neighbor's overflow commands\n");
     h_nvnCommandBufferInitialize(&c, NULL);
     h_nvnCommandBufferAddCommandMemory(&c, (NVNmemoryPool *)&pool, 0, 512);
     h_nvnCommandBufferBeginRecording(&c);

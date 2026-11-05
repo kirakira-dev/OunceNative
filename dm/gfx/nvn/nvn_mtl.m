@@ -7676,6 +7676,7 @@ void mtl_exec(const uint8_t *p) {
             }
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8);
+                PD("Y call cmd=%p target=%#llx depth=%d", p, (unsigned long long)t, g_ret_n);
                 if (g_ret_n < 16) g_ret[g_ret_n] = p + h.size; g_ret_n++;   // Return stack for lookahead: after a sub-list ends, continue looking at the caller
                 mtl_exec((const uint8_t *)t); g_ret_n--; break; }
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4);
@@ -7768,6 +7769,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
             case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_PUSH_CONSTANTS:
             case OP_POLY_OFFSET: case OP_PATCH_SIZE: case OP_PRIMITIVE_RESTART: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
+                if (h.op == OP_BIND_UBO) { const p_bind_buf *b = a; PD("Y bind_ubo cmd=%p st%d reg%d addr=%#llx size=%llu", p, b->stage, b->index, (unsigned long long)b->addr, (unsigned long long)b->size); }
                 state_op(h.op, a); break;
             case OP_COPY_B2T: copy_b2t(a); break;
             case OP_COPY_T2B: copy_t2b(a); break;
@@ -8388,6 +8390,7 @@ static void *link_main(void *arg) {   // Display link thread: started when switc
     (void)arg;
     pthread_setname_np("nvn-present-link");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    @autoreleasepool {
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     pthread_mutex_lock(&g_pq_mu); g_link_owns_layer = 1; while (g_classic_busy) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu);   // Wait for the present thread to finish handing over the frame it holds
     NvMetalDisplayLinkDelegate *delegate = [NvMetalDisplayLinkDelegate new];
@@ -8397,8 +8400,15 @@ static void *link_main(void *arg) {   // Display link thread: started when switc
     link.delegate = delegate;
     [link addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
     g_link_rl = CFRunLoopGetCurrent(); g_link = link;
-    CFRunLoopRun();   // When switching back to mode 0 the display link object is invalidated and this thread exits (nextDrawable cannot get a drawable while the layer still has the display link object attached, so pausing alone is not enough)
+    // This is our pthread, not AppKit's event loop. The update and its drawable
+    // are created before needsUpdate enters, so its inner pool cannot release
+    // them. Drain after each run-loop iteration, including empty display ticks.
+    for (;;) { @autoreleasepool {
+        SInt32 result = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, true);
+        if (result == kCFRunLoopRunStopped || result == kCFRunLoopRunFinished) break;
+    } }
     g_link_started = 0;
+    }
     return NULL;
 }
 static void link_sync(void) {   // Called every frame by the game's present thread: aligns the display link object's state to g_dm_present_link and the power-saving mode (can change at run time)

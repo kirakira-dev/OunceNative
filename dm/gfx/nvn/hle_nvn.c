@@ -646,10 +646,31 @@ NVN(nvnQueueFinish, void, NVNqueue *q) { (void)q; mtl_finish(); }
 
 // ---------- Command buffer: record into the game's command memory, perform CPU-visible side effects at submit ----------
 #define CB(c) ((cmd_t *)(c))
+// Keep host-only lifetime bookkeeping outside the SDK command-buffer object.
+// Entries survive object-address reuse; Initialize resets their recording state.
+typedef struct cmd_lifetime {
+    const cmd_t *owner; struct cmd_lifetime *next;
+    uint64_t recording_id, reclaim_epoch;
+    uintptr_t reclaim_lo, reclaim_hi;
+} cmd_lifetime;
+static cmd_lifetime *cmd_life(const cmd_t *o) {
+    static cmd_lifetime *buckets[1024]; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static _Thread_local cmd_lifetime *last;
+    if (last && last->owner == o) return last;
+    unsigned bucket = ((uintptr_t)o >> 4) & 1023;
+    pthread_mutex_lock(&mu);
+    cmd_lifetime *m = buckets[bucket]; while (m && m->owner != o) m = m->next;
+    if (!m) {
+        m = calloc(1, sizeof *m); if (!m) die("NVN command lifetime allocation failed");
+        m->owner = o; m->next = buckets[bucket]; buckets[bucket] = m;
+    }
+    pthread_mutex_unlock(&mu); last = m; return m;
+}
 #define OP_RESERVE 24                             // Always keep enough room at the segment end for one JUMP / END
 
 NVN(nvnCommandBufferInitialize, NVNboolean, NVNcommandBuffer *c, NVNdevice *d) {
-    memset(c, 0, sizeof(cmd_t)); CB(c)->magic = MAGIC('C', 'M', 'D', 'B'); CB(c)->dev = d; return 1;
+    memset(c, 0, sizeof(cmd_t)); CB(c)->magic = MAGIC('C', 'M', 'D', 'B'); CB(c)->dev = d;
+    cmd_lifetime *life = cmd_life(CB(c)); life->recording_id = life->reclaim_epoch = 0; return 1;
 }
 NVN(nvnCommandBufferFinalize, void, NVNcommandBuffer *c) { CB(c)->magic = 0; }
 NVN(nvnCommandBufferSetMemoryCallback, void, NVNcommandBuffer *c, PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb) { CB(c)->cb = cb; }
@@ -672,34 +693,38 @@ static void cs_dump(void) {   // Called once per frame (at present)
     int on = g_cs.on; memset(&g_cs, 0, sizeof g_cs); g_cs.on = on; g_cs.frame0 = f; pthread_mutex_unlock(&g_cs_mu);
 }
 static void put_hdr(uint8_t *p, uint32_t op, uint32_t size) { op_hdr h = {op, size}; memcpy(p, &h, sizeof h); if (op) cs_op(op, size); }
+static void hostseg_written(cmd_t *o, uint8_t *p, size_t size);
 // New segment: if recording is in progress, write a JUMP at the end of the old segment to link it
 static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
     uint8_t *start = align8(mem), *end = mem + n;
-    if (o->recording && o->cur) { if (cs_on() && o->end > o->cur) { pthread_mutex_lock(&g_cs_mu); g_cs.waste += (uint64_t)(o->end - o->cur); pthread_mutex_unlock(&g_cs_mu); } put_hdr(o->cur, OP_JUMP, 16); memcpy(o->cur + 8, &start, 8);
+    if (o->recording && o->cur) { if (cs_on() && o->end > o->cur) { pthread_mutex_lock(&g_cs_mu); g_cs.waste += (uint64_t)(o->end - o->cur); pthread_mutex_unlock(&g_cs_mu); } hostseg_written(o, o->cur, 16); put_hdr(o->cur, OP_JUMP, 16); memcpy(o->cur + 8, &start, 8);
         o->used += 16; }   // the JUMP also occupies guest memory of this recording: count it in used, so the game packing the next recording right behind by used does not overwrite it
     o->cur = start; o->end = end;
 }
 // Host-supplied segment when the game's own command memory runs out: when the game's out-of-memory callback cannot allocate from its command memory pool, it calls AddCommandMemory with an empty pool (p = NULL, n = 0)
 // (opening the advanced stats page on the level 88 sorceress save: many list items in one frame, and the original implementation segfaulted here reading NULL+8). Our records are larger than real-device NVN commands, so the budget the game reserved for real-device usage is not necessarily enough,
-// so this is not an error state of the game but something we must catch: provide a segment of host memory to keep recording. The segment is replayed in place at submit and reclaimed after being kept for 8 frames (submit is in the same frame as recording or the next one).
+// so this is not an error state of the game but something we must catch: provide a segment of host memory to keep recording. The segment is replayed in place and retained while its guest command origin remains live.
 // (Do not use the whole game chunk as the range: SMBW sub-allocates many recordings out of one big chunk, and a later grant inside that chunk freed segments still in use.)
 // Reclaim follows the game's command memory chunks, not a frame count: the game caches recorded command handles and CALLs them every frame until it re-records them itself (SMBW's object setup handles);
 // once a handle was recorded into a host segment, the old "reclaim 8 frames after lending" rewrote the segment while the game still CALLed it (with overflow forced on the Mac, the replay read garbage commands: RGBA16F used as a depth format for a pipeline).
-// A segment hangs off one recording through the JUMP at the end of its guest part: that recording occupies [BEGIN, end of JUMP) in guest memory, and the game only gives those bytes out again once they are dead
-// (when it re-records that material in place; packing the next recording right behind by used never touches them, since used includes the JUMP). So a segment remembers that guest range and is reclaimed when the game gives out memory
-// overlapping it; segments overflowing from a host segment keep the same range.
+// A segment hangs off one recording through the JUMP at the end of its guest part: that recording occupies [BEGIN, end of JUMP) in guest memory. A segment remembers that range and is reclaimed when a later recording actually overwrites it;
+// segments overflowing from a host segment keep the same range. Packing the next recording behind it by used never touches it, since used includes the JUMP.
+// A memory grant alone is not a write: Raiders grants at least 512 bytes when
+// re-recording smaller packed lists, overlapping a live neighboring handle.
 // The segment pool grows on demand; its retained allocation is bounded by HOSTSEG_CAP.
 #define HOSTSEG_SZ (256u << 10)
 #define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
-typedef struct { uint8_t *mem; size_t size; uint64_t frame; int busy; uintptr_t org_lo, org_hi; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
+typedef struct { uint8_t *mem; size_t size; uint64_t frame; int busy; uintptr_t org_lo, org_hi; uint64_t recording_id; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
 static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg; static size_t g_hostseg_bytes;
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_hostseg_epoch = 1, g_recording_id;
 // Take a segment: origin = the current recording's guest bytes [BEGIN, end of JUMP); if the write pointer is already in a host segment (overflowing again), keep that segment's origin
 static uint8_t *hostseg_take(const cmd_t *o, size_t required, size_t *granted) {
     static unsigned total; uint64_t f = dm_nvn_frame_count(); uint8_t *m = NULL;
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     size_t capacity = HOSTSEG_SZ;
+    uint64_t recording_id = o ? cmd_life(o)->recording_id : 0;
     pthread_mutex_lock(&g_hostseg_mu);
     int in_seg = 0;
     for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && cur <= (uintptr_t)g_hostseg[i].mem + g_hostseg[i].size) {
@@ -716,13 +741,14 @@ static uint8_t *hostseg_take(const cmd_t *o, size_t required, size_t *granted) {
         (reuse < 0 || g_hostseg[i].size < g_hostseg[reuse].size)) reuse = i;
     if (reuse >= 0) {
         hostseg_t *seg = &g_hostseg[reuse]; capacity = seg->size; m = seg->mem;
-        *seg = (hostseg_t){m, capacity, f, 1, lo, hi};
+        *seg = (hostseg_t){m, capacity, f, 1, lo, hi, recording_id};
     }
     if (!m && capacity <= HOSTSEG_CAP - g_hostseg_bytes) {
         if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
         m = malloc(capacity);
-        if (m) { g_hostseg[g_nhostseg++] = (hostseg_t){m, capacity, f, 1, lo, hi}; g_hostseg_bytes += capacity; }
+        if (m) { g_hostseg[g_nhostseg++] = (hostseg_t){m, capacity, f, 1, lo, hi, recording_id}; g_hostseg_bytes += capacity; }
     }
+    __atomic_add_fetch(&g_hostseg_epoch, 1, __ATOMIC_RELEASE);
     unsigned t = ++total; int n = g_nhostseg; size_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_mu);
     if (!m) die("[RED] NVN command memory: cannot lend %zu bytes (%zu bytes retained)", capacity, bytes);
@@ -730,10 +756,24 @@ static uint8_t *hostseg_take(const cmd_t *o, size_t required, size_t *granted) {
     *granted = capacity;
     return m;
 }
-// The game gives out [lo, hi): segments whose recording's guest bytes overlap it are dead, reclaim them
-static void hostseg_release(uintptr_t lo, uintptr_t hi) {
+// Retire an older list only when its guest command bytes are overwritten.
+// Cache the interval up to the next live origin, so ordinary command writes do
+// not scan the ledger. A newly lent segment invalidates those interval caches.
+static void hostseg_written(cmd_t *o, uint8_t *p, size_t size) {
+    uintptr_t lo = (uintptr_t)p, hi = lo + size;
+    cmd_lifetime *life = cmd_life(o);
+    if (life->reclaim_epoch == __atomic_load_n(&g_hostseg_epoch, __ATOMIC_ACQUIRE) &&
+        lo >= life->reclaim_lo && hi <= life->reclaim_hi) return;
     pthread_mutex_lock(&g_hostseg_mu);
-    for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_hi > lo && g_hostseg[i].org_lo < hi) g_hostseg[i].busy = 0;
+    uintptr_t next = UINTPTR_MAX;
+    for (int i = 0; i < g_nhostseg; i++) {
+        hostseg_t *s = &g_hostseg[i];
+        if (!s->busy || (o->recording && s->recording_id == life->recording_id)) continue;
+        if (s->org_hi > lo && s->org_lo < hi) s->busy = 0;
+        else if (s->org_lo >= hi && s->org_lo < next) next = s->org_lo;
+    }
+    life->reclaim_lo = lo; life->reclaim_hi = next;
+    life->reclaim_epoch = __atomic_load_n(&g_hostseg_epoch, __ATOMIC_RELAXED);
     pthread_mutex_unlock(&g_hostseg_mu);
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
@@ -741,7 +781,6 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     if ((!pl || n < 64) && getenv("DM_NVN_CBLOG")) { static unsigned log_n; if (__atomic_fetch_add(&log_n, 1, __ATOMIC_RELAXED) < 20) LOG("[nvn] empty command grant cmd=%p pool=%p off=%#lx n=%zu begin=%p cur=%p used=%llu", c, p, off, n, CB(c)->begin, CB(c)->cur, CB(c)->used); }
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t granted; uint8_t *mem = hostseg_take(CB(c), 64, &granted); cmd_new_segment(CB(c), mem, granted); return; }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
-    hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);
@@ -765,12 +804,14 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
         o->cb((NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY, size + OP_RESERVE, o->cb_data);
     }
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.bytes += size; g_cs.recs++; pthread_mutex_unlock(&g_cs_mu); }
-    uint8_t *p = o->cur; o->cur += size; o->used += size; put_hdr(p, 0, size); return p;
+    uint8_t *p = o->cur; hostseg_written(o, p, size); o->cur += size; o->used += size; put_hdr(p, 0, size); return p;
 }
 NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
     if (o->recording) LOG("[RED] BeginRecording re-entered");
     o->recording = 1;
+    cmd_lifetime *life = cmd_life(o);
+    life->recording_id = __atomic_add_fetch(&g_recording_id, 1, __ATOMIC_RELAXED); life->reclaim_epoch = 0;
     uint8_t *p = cmd_alloc(o, 8); put_hdr(p, OP_BEGIN, 8); o->begin = p;
 }
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
@@ -780,7 +821,7 @@ NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     // a cached list when it is re-recorded into a compact allocation.
     if (!o->recording || !o->cur || o->cur + 8 > o->end)
         die("[RED] EndRecording has no active command segment");
-    put_hdr(o->cur, OP_END, 8); o->cur += 8; o->used += 8;
+    hostseg_written(o, o->cur, 8); put_hdr(o->cur, OP_END, 8); o->cur += 8; o->used += 8;
     o->recording = 0;
     return (NVNcommandHandle)o->begin;
 }
