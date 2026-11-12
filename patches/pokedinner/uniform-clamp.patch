@@ -1,0 +1,104 @@
+diff --git a/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h b/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
+--- a/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
++++ b/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
+@@ -1410,7 +1410,7 @@
+                     // These GPR operations and a reconvergence declaration cannot change UR/UP.
+                     switch (op) {
+                     case 0xa20: case 0x823: case 0xa23: case 0x820: case 0xa02: case 0x621:
+-                    case 0x802: case 0x231: case 0x326: case 0x623: case 0x232: case 0x23e:
++                    case 0x802: case 0x810: case 0x231: case 0x326: case 0x623: case 0x232: case 0x23e:
+                     case 0x430: case 0x816: case 0x220: case 0x230: case 0x308: case 0x945: case 0x919:
+                         break;
+                     default:
+diff --git a/src/tests/CMakeLists.txt b/src/tests/CMakeLists.txt
+--- a/src/tests/CMakeLists.txt
++++ b/src/tests/CMakeLists.txt
+@@ -23,5 +23,6 @@
+     video_core/ampere_quad_gradients.cpp
+     video_core/ampere_texture_half.cpp
+     video_core/ampere_scalar_modes.cpp
++    video_core/ampere_uniform_clamp.cpp
+     input_common/calibration_configuration_job.cpp
+ )
+diff --git a/src/tests/video_core/ampere_uniform_clamp.cpp b/src/tests/video_core/ampere_uniform_clamp.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/tests/video_core/ampere_uniform_clamp.cpp
+@@ -0,0 +1,77 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++#ifndef AMPERE_UNIFORM_CLAMP_STANDALONE
++#include <catch2/catch_test_macros.hpp>
++#endif
++
++#include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
++
++namespace {
++using Shader::Ampere::Instruction;
++using Shader::Ampere::LowerToMaxwell;
++
++unsigned CheckUniformClamp() {
++    const std::vector<Instruction> original{
++        {{0x0400788c, 3, 0x0bf01070, 0}}, // UP0 = UR4 < 3.
++        {{0x02057810, 0x100, 0x07ffe0ff, 0}}, // Ordinary R5 = R2 + 256.
++        {{0x04047887, 3, 0x08000000, 0}}, // UR4 = UP0 ? UR4 : 3.
++        {{0x0000794d, 0, 0x03800000, 0}},
++    };
++    unsigned checked = 0;
++    const auto check = [&](const std::vector<Instruction>& code, bool recognized) {
++        const auto lowered = LowerToMaxwell(code);
++        if (!lowered) {
++            std::fprintf(stderr, "uniform clamp lowering failed: %.*s\n",
++                         static_cast<int>(lowered.error.size()), lowered.error.data());
++            std::abort();
++        }
++        unsigned clamps = 0;
++        for (const u64 instruction : lowered.instructions) {
++            // The uniform compare/select becomes an unsigned, PT-selected minimum.
++            clamps += instruction == (0x3820000000070000ULL | 220 | (u64{220} << 8) |
++                                      (u64{3} << 20) | (u64{7} << 39));
++        }
++        if (clamps != (recognized ? 1U : 0U)) {
++            std::fprintf(stderr, "uniform clamp recognition case %u failed\n", checked);
++            std::abort();
++        }
++        ++checked;
++    };
++    check(original, true);
++    auto code = original;
++    code.erase(code.begin() + 1);
++    check(code, true);
++    code = original;
++    code[1].words[1] = 0xfffffff9; // Ordinary wrapping subtraction is also independent.
++    check(code, true);
++    code = original;
++    code[1] = {{0x00047882, 9, 0, 0}}; // Writes the selected uniform register.
++    check(code, false);
++    code = original;
++    code[1] = {{0x0400788c, 4, 0x0bf01070, 0}}; // Replaces UP0 with a different test.
++    check(code, false);
++    code = original;
++    code[0].words[1] = 4; // Mismatched comparison and selection limits.
++    check(code, false);
++    code = original;
++    // A branch into the select may bypass the comparison and the scheduled addition.
++    code.insert(code.begin(), {{0x00000947, 32, 0x03800000, 0}});
++    check(code, false);
++    return checked;
++}
++} // namespace
++
++#ifdef AMPERE_UNIFORM_CLAMP_STANDALONE
++int main() {
++    std::printf("PASS %u uniform clamp recognition cases\n", CheckUniformClamp());
++}
++#else
++TEST_CASE("Ampere uniform clamps allow independent integer scheduling",
++          "[video_core][ampere]") {
++    REQUIRE(CheckUniformClamp() == 7);
++}
++#endif
