@@ -8396,9 +8396,19 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         CFTimeInterval tt = d.presentedTime;
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
     }];
-    // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
+    // A minimum duration keeps the previous drawable visible for a full period,
+    // avoiding paired 25 ms / 8.33 ms intervals on some 120 Hz displays. Allow
+    // disabling it separately from layer vsync: Raiders on macOS showed up to
+    // one-second nextDrawable waits with it enabled. The NVN acquire pacer still
+    // enforces the game's present interval when this extra duration is disabled.
+    static int min_duration = -1;
+    if (min_duration < 0) {
+        const char *e = getenv("DM_PRESENT_MIN_DURATION");
+        min_duration = !e || atoi(e) != 0;
+        if (e) MLOG("drawable minimum duration: %s", min_duration ? "enabled" : "disabled");
+    }
     if (target_ts > 0) [dr present];
-    else if (period > 0) [dr presentAfterMinimumDuration:period]; else [dr present];
+    else if (min_duration && period > 0) [dr presentAfterMinimumDuration:period]; else [dr present];
 #endif
     return 1;
 }

@@ -150,6 +150,7 @@ Resource locations:
 | `DM_PSO_USER=path` | Where to keep the per-device list of shaders and pipelines built on the spot (default: `pso_user.tsv` in the parent of `DM_SAVE`) |
 | `DM_PSO_WORKERS=1..8` | Concurrent warm-up workers (default 1; the Raiders Mac bundle uses 4). Shader dependencies are loaded once per key. |
 | `DM_PSO_STARTUP_WAIT_MS=N` | Wait before the first shader is consumed, up to N milliseconds (maximum 120000; default 0). The Mac window shows preparation progress. On timeout, warm-up continues in the background. The Raiders Mac bundle uses 120000. |
+| `DM_PRESENT_MIN_DURATION=0` | Disable the drawable's extra minimum display duration in the direct presentation path; layer vsync and NVN acquire pacing remain active. Default 1; the Raiders Mac bundle uses 0 to avoid reproduced long drawable waits. Display-link presentation is unaffected. |
 
 Logging and capture:
 

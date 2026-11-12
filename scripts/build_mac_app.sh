@@ -71,6 +71,7 @@ if profile_id == '0400380020056000':
     # The direct drawable path keeps presenting when macOS display-link
     # callbacks pause; the layer still synchronizes presentation to vblank.
     environment['DM_PRESENT_LINK'] = '0'
+    environment['DM_PRESENT_MIN_DURATION'] = '0'
     environment['DM_PSO_WORKERS'] = '4'
     environment['DM_PSO_STARTUP_WAIT_MS'] = '120000'
 info = {
