@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile captured NX2 shaders and check their Metal resource bindings."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -456,12 +457,15 @@ def main():
     ap.add_argument('compiler', type=Path)
     ap.add_argument('fork', type=Path)
     ap.add_argument('output', type=Path)
+    ap.add_argument('--workers', type=int, choices=range(1, 9), default=1,
+                    help='concurrent independent shader conversions (default: 1)')
     args = ap.parse_args()
     profile = game.load()
     if profile.get('platform', 'nx') != 'nx2':
         raise ValueError('captured NX2 shaders require an NX2 game profile')
     jobs = json.loads(args.jobs.read_text())
     selected, rejected = [], []
+    seen = set()
     for job in jobs:
         control = Path(job['control']).read_bytes()
         code = Path(job['code']).read_bytes()
@@ -472,6 +476,9 @@ def main():
         key = hashlib.sha256(control + code + c1).hexdigest()[:16]
         if key != job['key']:
             raise ValueError(f'input key mismatch {key} != {job["key"]}')
+        if key in seen:
+            raise ValueError(f'duplicate shader job {key}')
+        seen.add(key)
         stage = struct.unpack_from('<H', control, 0x56)[0]
         if stage not in (0, 1, 5):
             rejected.append(dict(key=key, reason='resource layout not yet supported', stage=stage))
@@ -482,8 +489,8 @@ def main():
     selected_file = scratch / 'jobs.json'
     selected_file.write_text(json.dumps([j for j, s in selected], indent=2))
     run([args.compiler, selected_file, scratch])
-    prepared = []
-    for job, stage in selected:
+    def prepare_program(item):
+        job, stage = item
         key = job['key']
         meta = json.loads((scratch / (key+'.json')).read_text())
         spirv, bank_proofs = prepare_spirv(scratch / (key+'.spv'), meta)
@@ -518,7 +525,10 @@ def main():
             src, mask = fragment_output_types(src)
             if mask:
                 reflection['color_output_types'] = dict(version=1, constant_base=128, mask=mask)
-        prepared.append((job, stage, src, reflection))
+        return job, stage, src, reflection
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        prepared = list(executor.map(prepare_program, selected))
     provenance = dict(fork_commit=run(['git', '-C', args.fork, 'rev-parse', 'HEAD']).strip(),
                       compiler_sha256=sha(args.compiler),
                       compiler_source_sha256=sha(args.fork/'src/shader_recompiler/nx2_offline.cpp'),
@@ -548,8 +558,8 @@ def main():
             library = source.with_suffix('.metallib')
             if library.exists():
                 reusable[sha(source)] = library
-    reused = 0
-    for job, stage, src, reflection in prepared:
+    def build_library(item):
+        job, stage, src, reflection = item
         key = job['key']
         stem = destination / (key + '_b')
         msl = stem.with_suffix('.metal')
@@ -560,7 +570,6 @@ def main():
         if cached:
             if cached != library:
                 shutil.copy2(cached, library)
-            reused += 1
         else:
             run(['xcrun', '-sdk', 'macosx', 'metal', *provenance['metal_options'], msl, '-o', air])
             run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', library])
@@ -569,6 +578,10 @@ def main():
                           library_binary_sha256=sha(library),
                           facts_source=job.get('facts_source'), compiler=provenance)
         stem.with_suffix('.json').write_text(json.dumps(reflection, indent=2))
+        return int(cached is not None)
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        reused = sum(executor.map(build_library, prepared))
     # Reserve each constant segment's full declared range until its dynamic indices
     # have been proven bounded; adjacent shaders must never supply out-of-range bytes.
     profile.table('c1_full.tsv').write_text(f'# chain b-{chain}\n' + ''.join(

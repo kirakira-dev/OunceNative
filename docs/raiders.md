@@ -2,7 +2,7 @@
 
 The development profile is `0400380020056000`, using update `v65536`, SDK 21.4.4, and NVN 231.39. Module IDs are recorded in `dm/games/0400380020056000/game.tsv`. The base build is identified, but runtime testing uses the update.
 
-The tested route covers native boot, menus, character creation, save reload, the airship conversations, the first island, and Piel Coast on Erpp Island. Virtual motion input completes the aiming tutorial. The Piel Coast test exercises movement, swimming, crate destruction, shard collection, enemy damage, life loss, recovery, and the companion bot with an isolated save. The local package currently contains 2,168 translated shader programs, including 1,146 fragments with alpha-test support. It is built from observed programs and does not cover the complete BFSHA archive or unseen scenes. The November 12 audit still finds 281 shader keys in older play logs that have neither a library nor a retained capture.
+The tested route covers native boot, menus, character creation, save reload, the airship conversations, the first island, and Piel Coast on Erpp Island. Virtual motion input completes the aiming tutorial. The Piel Coast test exercises movement, swimming, crate destruction, shard collection, enemy damage, life loss, recovery, and the companion bot with an isolated save. The local package currently contains 9,991 translated shader programs, including 1,273 fragments with alpha-test support. It combines 2,168 observed programs with 7,823 archive programs that compile without external resource facts. The archive scan found 20,036 unique programs in 698 BNSH containers; 1,809 overlaps with retained captures match byte for byte. Coverage remains incomplete: 157 older-log keys still have no library, although the scan recovered the bytes for 151 of them. The broader archive preflight also rejects programs needing resource facts or unsupported compiler operations.
 
 The renderer fixes the opening scene's black output, swapped half-texture components, missing player skin, and command-list corruption. A later black-frame failure was traced to a full conditional-render table: dropped timestamp reports let repeated clears erase the scene. Dynamic report tracking fixes that reproduced failure. Alternating dark terrain and sky were separately traced to premature reuse of a cached command list's overflow storage; reclamation now follows actual command writes. Consecutive first-island captures preserve the lighting after this fix. Adding the missing Piel Coast programs removes the reproduced black patches on props and enemies. Alpha-reference commands are now recorded and replayed, and fragments implement all eight alpha comparisons before color/depth exports. Later areas, including Piel Coast's bright fog and pale terrain, still need checking against console output. Audio produces nonzero output, but listening and synchronization checks remain incomplete.
 
@@ -101,11 +101,27 @@ make -C dm/host GAME="$DM_GAME"
 
 The converter validates capture hashes and rejects unknown texture formats. The builder records compiler and source fingerprints, regenerates the profile's shader map and C1 index, and reports rejected stages. Review those results before rerunning. New scenes can require additional captures and rebuilds.
 
+### Archive coverage
+
+The archive scanner requires the Python `zstandard` package. It extracts NX2 programs from BNSH containers, including those embedded in particle effects, layouts, zstd files, and recursive SARC archives. It validates stage declarations and section bounds, and hashes the exact control, used instructions, and C1 bytes with the same key as the runtime. It does not include allocation padding in that key.
+
+```sh
+python3 dm/gfx/tools/nx2_bnsh_extract.py "$DM_ROMFS" \
+  --output "$RAIDERS_WORK/archive-shaders"
+python3 dm/gfx/tools/nx2_bnsh_jobs.py "$RAIDERS_WORK/archive-shaders" \
+  "$POKEDINNER/build/bin/nx2-offline" "$RAIDERS_WORK/archive-preflight" \
+  --exclude-map "dm/games/$DM_GAME/shader_map.tsv"
+```
+
+The scanner also accepts additional files, such as already decompressed module images. Its index records the source container and offsets for each program. The preflight verifies those extracted bytes and supplies no external texture, descriptor, or root-constant facts. `ready-jobs.json` contains only programs accepted by the strict compiler; `summary.json` records the rejected cases. Stripped archive reflection cannot establish the missing resource types, so these rejections still require runtime captures or further verified format support.
+
+Keep the current captured programs when incorporating archive jobs into a package, and validate the complete merged package before installing it. `dmsh_nx2_build.py --workers 6` converts and compiles independent programs concurrently; its default remains one worker. Run `python3 dm/gfx/tests/test_nx2_bnsh.py` to check the archive reader's native keys, bounds rejection, nested containers, and strict selection of successful jobs.
+
 ## Validation
 
 The regression tests cover retained command memory, copied command lists, compact list re-recording, graphics and compute root constants, integer color outputs, missing fragment varyings, compressed texture block rendering, packaged texture aliases, and visibility-buffer rollover. The motion test checks the 96-byte sensor ABI, sample timing, orientation, angular velocity, and gravity. The separately built compiler has a 120-case half-texture packing test; the previous packing order fails it.
 
-The alpha-test regression runs 96 GPU cases against 6,912 color/depth values. It checks every comparison, equality boundaries, signed zero, NaN, recorded reference changes, multiple fragment returns, and both orders of the retained-source transformations. Run it with `make -C dm/gfx/tests GAME="$DM_GAME" t_alpha_test` followed by `python3 dm/gfx/tests/test_alpha_test.py`. The November 12 package validation loads all 2,168 reflection records and 3,112 native functions under Metal validation. These checks establish the tested API and package behavior, not complete game coverage.
+The alpha-test regression runs 96 GPU cases against 6,912 color/depth values. It checks every comparison, equality boundaries, signed zero, NaN, recorded reference changes, multiple fragment returns, and both orders of the retained-source transformations. Run it with `make -C dm/gfx/tests GAME="$DM_GAME" t_alpha_test` followed by `python3 dm/gfx/tests/test_alpha_test.py`. The November 12 package validation loads all 9,991 reflection records and 17,994 native functions under Metal validation. The archive update reaches the rendered title without error diagnostics through 14,700 reported frames. Gameplay was not repeated with this final package because UI automation timed out after closing Settings; the earlier Piel Coast checks used smaller captured packages. These checks establish the tested API and package behavior, not complete game coverage.
 
 To check a generated shader package against Metal:
 
