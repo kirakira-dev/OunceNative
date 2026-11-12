@@ -3994,6 +3994,42 @@ static id<MTLBuffer> support_buf(void) {
 static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support_buf().gpuAddress; return gpu; }
 static id<MTLBuffer> zero_bank(void) { static __strong id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
 static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_bank().gpuAddress; return gpu; }
+// NX2 TXQ record v1. Use NVN's target because 1D and single cubes can be
+// represented by Metal 2D textures/arrays. Extents and mip ranges come from
+// the registered view, so selecting a mip or layer range changes the query.
+static void texture_query_record(int tid, uint32_t words[8]) {
+    memset(words, 0, 32);
+    void *object = NULL; if (tid) tex_fast_rid(tid, &object);
+    id<MTLTexture> t = (__bridge id<MTLTexture>)object;
+    if (!t || tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return;
+    const treg_t *r = &g_treg[tid];
+    int target = r->has_v && r->v.set_target ? r->v.target : r->t.d.target;
+    words[0] = (uint32_t)t.width; words[3] = (uint32_t)t.mipmapLevelCount;
+    switch (target) {
+        case NVN_TEXTURE_TARGET_1D: words[4] = 1; break;
+        case NVN_TEXTURE_TARGET_1D_ARRAY: words[1] = (uint32_t)t.arrayLength; words[4] = 1; break;
+        case NVN_TEXTURE_TARGET_3D:
+            words[1] = (uint32_t)t.height; words[2] = (uint32_t)t.depth; words[4] = 7; break;
+        case NVN_TEXTURE_TARGET_2D_ARRAY:
+        case NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY:
+            words[2] = (uint32_t)t.arrayLength;
+            words[1] = (uint32_t)t.height; words[4] = 3; break;
+        case NVN_TEXTURE_TARGET_CUBEMAP_ARRAY:
+            words[2] = (uint32_t)t.arrayLength / (t.textureType == MTLTextureType2DArray ? 6 : 1);
+            words[1] = (uint32_t)t.height; words[4] = 3; break;
+        case NVN_TEXTURE_TARGET_BUFFER: break;
+        case NVN_TEXTURE_TARGET_2D:
+        case NVN_TEXTURE_TARGET_RECTANGLE:
+        case NVN_TEXTURE_TARGET_CUBEMAP:
+        case NVN_TEXTURE_TARGET_2D_MULTISAMPLE:
+            words[1] = (uint32_t)t.height; words[4] = 3; break;
+        default: RED_ONCE(97, "unsupported texture query target %d", target); memset(words, 0, 32); return;
+    }
+    if (target == NVN_TEXTURE_TARGET_BUFFER || target == NVN_TEXTURE_TARGET_RECTANGLE ||
+        target == NVN_TEXTURE_TARGET_2D_MULTISAMPLE || target == NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY) {
+        words[3] = 1; words[4] = 0; words[5] = 1;
+    }
+}
 // Shift all UI draws down as a whole (iPad true fullscreen, the UI rect does not touch the top edge of the picture): add a clip-space vertical offset to the projection matrix at the start of the vertex stage's cb0, and bind a modified copy instead.
 // Moving the viewport is not used: the viewport's top edge is the edge of the clip volume, so top-anchored widgets that the host lifts back to the real top of the picture (UI coordinate y negative) would be clipped away entirely.
 // g_ui_moff is set per draw by draw() (0 = no change); the copies live in a ring buffer, and the same address in the same pass is copied only once.
@@ -4084,6 +4120,12 @@ static int encode_args_to(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage,
             if (bl && sid > 0) { int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0};   // g_rmu is already held in this section
                 if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d (0 nearest / 1 linear; 2–5 with mips) wrap=%d,%d,%d border=%g,%g,%g,%g lod=%g..%g bias=%g aniso=%g cmp=%d/%d %s", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf,
                            (int)sp.ws, (int)sp.wt, (int)sp.wr, sp.border[0], sp.border[1], sp.border[2], sp.border[3], sp.lod_min, sp.lod_max, sp.lod_bias, sp.aniso, (int)sp.cmp_mode, (int)sp.cmp_func, ss ? "real" : "failed"); }
+        } else if (b->kind == NVN_RB_TEX_QUERY || b->kind == NVN_RB_IMG_QUERY) {
+            uint64_t handle = b->kind == NVN_RB_IMG_QUERY ? (reg < 32 ? S.img[nvn_stage][reg] : 0) :
+                                                                         (reg < 128 ? S.tex[nvn_stage][reg] : 0);
+            id<MTLBuffer> qb; size_t qo = arena_alloc(32, &qb);
+            texture_query_record((int)(handle & 0xfffff), (uint32_t *)((uint8_t *)qb.contents + qo));
+            slots[aid] = qb.gpuAddress + qo; USE(qb, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_TEX_FLAGS) {
             int tid = reg < 128 ? (int)(S.tex[nvn_stage][reg] & 0xfffff) : 0;
             void *tv = NULL; if (tid) tex_fast_rid(tid, &tv);

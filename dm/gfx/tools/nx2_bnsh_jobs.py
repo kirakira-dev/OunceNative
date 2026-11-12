@@ -77,6 +77,8 @@ def main():
     ap.add_argument('--exclude-map', type=Path, help='skip keys already in a shader_map.tsv')
     ap.add_argument('--runtime-texture-formats', action='store_true',
                     help='defer sampled numeric formats to the native Metal binding transform')
+    ap.add_argument('--runtime-texture-queries', action='store_true',
+                    help='resolve texture dimensions from live native descriptor bindings')
     args = ap.parse_args()
     root = args.extracted.resolve()
     index = json.loads((root / 'index.json').read_text())
@@ -92,6 +94,9 @@ def main():
     if args.runtime_texture_formats:
         for job in jobs:
             job['defer_sampled_texture_formats'] = True
+    if args.runtime_texture_queries:
+        for job in jobs:
+            job['defer_texture_queries'] = True
     args.output.mkdir(parents=True, exist_ok=False)
     source = args.output / 'all-jobs.json'
     source.write_text(json.dumps(jobs, indent=2))

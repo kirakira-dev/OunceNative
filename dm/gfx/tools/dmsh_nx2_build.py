@@ -189,6 +189,26 @@ def describe(src, stage, meta, layout):
                 raise ValueError('unresolved graphics driver-buffer reads')
             driver_reads['0'] = sorted(set(offsets))
             b.update(kind='drvcb', bank=0)
+        elif sbuf and meta['sbufs'][int(sbuf[1])].get('texture_query'):
+            desc = meta['sbufs'][int(sbuf[1])]
+            offset = desc['cb_offset']
+            if meta.get('deferred_texture_queries') != 1 or desc['count'] != 1 or desc['written']:
+                raise ValueError('invalid runtime texture query contract')
+            if layout:
+                base = layout.get('resource_base', 16) + 16*(layout['ubos']+layout['ssbos'])
+                image_base = base + 8*layout['textures']
+                if desc['cb_slot'] != 0 or offset % 8:
+                    raise ValueError('unsupported compute texture query handle')
+                if base <= offset < image_base:
+                    b.update(kind='tex_query', reg=(offset-base)//8)
+                elif image_base <= offset < image_base + 8*layout['images']:
+                    b.update(kind='img_query', reg=(offset-image_base)//8)
+                else:
+                    raise ValueError('compute texture query outside resource tables')
+            elif desc['cb_slot'] == 2 and 0x20 <= offset < 0x120 and (offset-0x20) % 8 == 0:
+                b.update(kind='tex_query', reg=(offset-0x20)//8)
+            else:
+                raise ValueError('unsupported graphics texture query handle')
         elif sbuf and layout:
             desc = meta['sbufs'][int(sbuf[1])]
             offset = desc['cb_offset']
@@ -265,8 +285,13 @@ def describe(src, stage, meta, layout):
             raise ValueError('unsupported image descriptor layout')
     vertex = [dict(location=int(m[2]), msl_type=m[1]) for m in
               re.finditer(r'(\w+)\s+\w+\s+\[\[attribute\((\d+)\)\]\]', attributes)]
-    return dict(route='B', entry='main0', bindings=bindings,
-                vertex_inputs=vertex, drv_reads=driver_reads, drv_unfillable=[], c1='')
+    result = dict(route='B', entry='main0', bindings=bindings,
+                  vertex_inputs=vertex, drv_reads=driver_reads, drv_unfillable=[], c1='')
+    if meta.get('deferred_texture_queries'):
+        if meta['deferred_texture_queries'] != 1:
+            raise ValueError('unsupported runtime texture query version')
+        result['runtime_texture_queries'] = dict(version=1)
+    return result
 
 
 def vertex_fetch_inputs(src):

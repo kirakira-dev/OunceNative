@@ -1,0 +1,129 @@
+--- a/src/shader_recompiler/environment.h
++++ b/src/shader_recompiler/environment.h
+@@ -91,6 +91,7 @@
+     [[nodiscard]] virtual bool PreserveNativeRootTables() const { return false; }
+ 
+     [[nodiscard]] virtual bool DeferSampledTextureFormats() const { return false; }
++    [[nodiscard]] virtual bool DeferTextureQueries() const { return false; }
+ 
+     [[nodiscard]] virtual u32 LocalMemorySize() const = 0;
+ 
+--- a/src/shader_recompiler/nx2_offline.cpp
++++ b/src/shader_recompiler/nx2_offline.cpp
+@@ -152,6 +152,7 @@
+     u32 TextureBoundBuffer() const override { return texture_buffer; }
+     bool PreserveNativeRootTables() const override { return job.value("native_root_tables", false); }
+     bool DeferSampledTextureFormats() const override { return job.value("defer_sampled_texture_formats", false); }
++    bool DeferTextureQueries() const override { return job.value("defer_texture_queries", false); }
+     u32 LocalMemorySize() const override { return stage == Shader::Stage::Compute ? job.at("local_memory").get<u32>() : static_cast<u32>(sph.LocalMemorySize()) + sph.common3.shader_local_memory_crs_size; }
+     u32 SharedMemorySize() const override { return job.value("shared", 0U); }
+     std::array<u32, 3> WorkgroupSize() const override { return job.value("local", std::array<u32,3>{1,1,1}); }
+@@ -178,7 +179,7 @@
+     for (const auto& d : info.constant_buffer_descriptors)
+         out["cbufs"].push_back({{"binding", binding++}, {"slot",d.index}, {"count",d.count}});
+     for (const auto& d : info.storage_buffers_descriptors)
+-        out["sbufs"].push_back({{"binding", binding++}, {"cb_slot",d.cbuf_index}, {"cb_offset",d.cbuf_offset}, {"count",d.count}, {"written",d.is_written}});
++        out["sbufs"].push_back({{"binding", binding++}, {"cb_slot",d.cbuf_index}, {"cb_offset",d.cbuf_offset}, {"count",d.count}, {"written",d.is_written}, {"texture_query",d.is_texture_query}});
+     for (const auto& d : info.texture_buffer_descriptors)
+         out["textures"].push_back({{"binding", binding++}, {"type",7}, {"cb_slot",d.cbuf_index}, {"cb_offset",d.cbuf_offset}, {"count",d.count}});
+     for (const auto& d : info.image_buffer_descriptors)
+@@ -270,6 +271,7 @@
+             if (job.contains("tessellation")) description["tessellation"] = job.at("tessellation");
+             if (env.native_root_table) description["native_root_table"] = {{"lowered_bank",17}, {"index",0}};
+             if (env.DeferSampledTextureFormats()) description["deferred_sampled_texture_formats"] = 1;
++            if (env.DeferTextureQueries()) description["deferred_texture_queries"] = 1;
+             std::ofstream(stem.string() + ".json") << description.dump(2);
+             ++ok;
+             report << Json{{"key",key},{"status","ok"}}.dump() << '\n';
+--- a/src/shader_recompiler/shader_info.h
++++ b/src/shader_recompiler/shader_info.h
+@@ -172,6 +172,7 @@
+     u32 cbuf_offset;
+     u32 count;
+     bool is_written;
++    bool is_texture_query{}; // Runtime dimension record; cbuf fields locate the texture handle.
+ 
+     auto operator<=>(const StorageBufferDescriptor&) const = default;
+ };
+--- a/src/shader_recompiler/ir_opt/texture_pass.cpp
++++ b/src/shader_recompiler/ir_opt/texture_pass.cpp
+@@ -766,6 +766,44 @@
+         inst->ReplaceOpcode(IndexedInstruction(*inst));
+ 
+         const auto& cbuf{texture_inst.cbuf};
++        if (env.DeferTextureQueries() && inst->GetOpcode() == IR::Opcode::ImageQueryDimensions) {
++            if (cbuf.count != 1 || cbuf.has_secondary || cbuf.shift_left != 0) {
++                throw NotImplementedException("Deferred texture query requires one direct handle");
++            }
++            auto& buffers = program.info.storage_buffers_descriptors;
++            auto found = std::ranges::find_if(buffers, [&](const auto& d) {
++                return d.is_texture_query && d.cbuf_index == cbuf.index && d.cbuf_offset == cbuf.offset;
++            });
++            u32 index = static_cast<u32>(std::distance(buffers.begin(), found));
++            if (found == buffers.end()) {
++                if (buffers.size() == Info::MAX_SSBOS) {
++                    throw NotImplementedException("Deferred texture query buffer limit");
++                }
++                buffers.push_back({.cbuf_index = cbuf.index, .cbuf_offset = cbuf.offset,
++                                   .count = 1, .is_written = false, .is_texture_query = true});
++            }
++            const auto at = IR::Block::InstructionList::s_iterator_to(*inst);
++            IR::IREmitter ir{*texture_inst.block, at};
++            const auto load = [&](u32 word) {
++                auto value = texture_inst.block->PrependNewInst(at, IR::Opcode::LoadStorage32,
++                                                               {ir.Imm32(index), ir.Imm32(word * 4)});
++                return IR::U32{IR::Value{&*value}};
++            };
++            // Record v1: base x/y/z, mip count, mip-scaled-axis mask, ignore-LOD flag.
++            const IR::U32 lod{inst->Arg(1)}, levels{load(3)}, mask{load(4)};
++            const auto valid = ir.LogicalOr(ir.INotEqual(load(5), ir.Imm32(0)), ir.ILessThan(lod, levels, false));
++            const auto shift = ir.UMin(lod, ir.Imm32(31));
++            std::array<IR::U32, 3> dimensions;
++            for (u32 axis = 0; axis < 3; ++axis) {
++                const auto base = load(axis);
++                const auto scaled = ir.UMax(ir.ShiftRightLogical(base, shift), ir.Imm32(1));
++                const auto use_mip = ir.INotEqual(ir.BitwiseAnd(mask, ir.Imm32(1u << axis)), ir.Imm32(0));
++                dimensions[axis] = IR::U32{ir.Select(valid, ir.Select(use_mip, scaled, base), ir.Imm32(0))};
++            }
++            const auto mips = inst->Arg(2).U1() ? ir.Imm32(0) : levels;
++            inst->ReplaceUsesWith(ir.CompositeConstruct(dimensions[0], dimensions[1], dimensions[2], mips));
++            continue;
++        }
+         auto flags{inst->Flags<IR::TextureInstInfo>()};
+         bool is_multisample{false};
+         switch (inst->GetOpcode()) {
+--- a/src/shader_recompiler/ir_opt/global_memory_to_storage_buffer_pass.cpp
++++ b/src/shader_recompiler/ir_opt/global_memory_to_storage_buffer_pass.cpp
+@@ -583,7 +583,8 @@
+     for (auto& desc : source.storage_buffers_descriptors) {
+         auto it{std::ranges::find_if(descriptors, [&desc](const auto& existing) {
+             return desc.cbuf_index == existing.cbuf_index &&
+-                   desc.cbuf_offset == existing.cbuf_offset && desc.count == existing.count;
++                   desc.cbuf_offset == existing.cbuf_offset && desc.count == existing.count &&
++                   desc.is_texture_query == existing.is_texture_query;
+         })};
+         if (it != descriptors.end()) {
+             it->is_written |= desc.is_written;
+--- a/src/shader_recompiler/frontend/maxwell/translate_program.cpp
++++ b/src/shader_recompiler/frontend/maxwell/translate_program.cpp
+@@ -121,7 +121,9 @@
+             continue;
+         }
+         const u32 offset{base + index * descriptor_size};
+-        const auto it{std::ranges::find(descs, offset, &StorageBufferDescriptor::cbuf_offset)};
++        const auto it{std::ranges::find_if(descs, [offset](const auto& d) {
++            return !d.is_texture_query && d.cbuf_index == 0 && d.cbuf_offset == offset;
++        })};
+         if (it != descs.end()) {
+             it->is_written |= program.info.stores_global_memory;
+             continue;
+--- a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
++++ b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
+@@ -318,6 +318,7 @@
+         ctx.Decorate(id, spv::Decoration::Binding, binding);
+         ctx.Decorate(id, spv::Decoration::DescriptorSet, 0U);
+         ctx.Name(id, fmt::format("ssbo{}", index));
++        if (desc.is_texture_query) ctx.Decorate(id, spv::Decoration::NonWritable);
+         if (ctx.profile.supported_spirv >= 0x00010400) {
+             ctx.interfaces.push_back(id);
+         }

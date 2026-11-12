@@ -152,6 +152,10 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         if (runtime_formats && (![runtime_formats isKindOfClass:NSDictionary.class] ||
             !tess_uint(runtime_formats[@"version"], 1) || [runtime_formats[@"version"] intValue] != 1))
             FAIL("invalid runtime texture format contract");
+        NSDictionary *runtime_queries = j[@"runtime_texture_queries"];
+        if (runtime_queries && (![runtime_queries isKindOfClass:NSDictionary.class] ||
+            !tess_uint(runtime_queries[@"version"], 1) || [runtime_queries[@"version"] intValue] != 1))
+            FAIL("invalid runtime texture query contract");
         uint8_t argument_ids[NVN_REFL_MAXB] = {0};
         uint8_t runtime_classes[128] = {0}, runtime_flags[128] = {0}, runtime_types[128] = {0};
         for (NSDictionary *b in bs) {
@@ -183,6 +187,15 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                     FAIL("invalid runtime texture flags");
                 r->kind = NVN_RB_TEX_FLAGS;
                 runtime_flags[reg] = 1;
+            }
+            else if ([k isEqualToString:@"tex_query"] || [k isEqualToString:@"img_query"]) {
+                BOOL image = [k isEqualToString:@"img_query"];
+                if (!runtime_queries || !tess_uint(rg, image ? 31 : 127) ||
+                    (![[b[@"msl_type"] description] hasPrefix:@"const device "] &&
+                     ![[b[@"msl_type"] description] hasPrefix:@"device "]) ||
+                    ![[b[@"msl_type"] description] hasSuffix:@"*"] || [b[@"rw"] boolValue] ||
+                    (image && ![j[@"stage"] isEqual:@"compute"])) FAIL("invalid runtime texture query binding");
+                r->kind = image ? NVN_RB_IMG_QUERY : NVN_RB_TEX_QUERY;
             }
             else FAIL("B binding kind %s not implemented (%s)", k.UTF8String, [b[@"msl_name"] UTF8String]);
             if (b[@"runtime_class"]) {
