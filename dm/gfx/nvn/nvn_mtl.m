@@ -4084,6 +4084,16 @@ static int encode_args_to(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage,
             if (bl && sid > 0) { int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0};   // g_rmu is already held in this section
                 if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d (0 nearest / 1 linear; 2–5 with mips) wrap=%d,%d,%d border=%g,%g,%g,%g lod=%g..%g bias=%g aniso=%g cmp=%d/%d %s", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf,
                            (int)sp.ws, (int)sp.wt, (int)sp.wr, sp.border[0], sp.border[1], sp.border[2], sp.border[3], sp.lod_min, sp.lod_max, sp.lod_bias, sp.aniso, (int)sp.cmp_mode, (int)sp.cmp_func, ss ? "real" : "failed"); }
+        } else if (b->kind == NVN_RB_TEX_FLAGS) {
+            int tid = reg < 128 ? (int)(S.tex[nvn_stage][reg] & 0xfffff) : 0;
+            void *tv = NULL; if (tid) tex_fast_rid(tid, &tv);
+            id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+            slots[aid] = t ? (uint64_t)pf_int_kind(t.pixelFormat) : 0;
+            if (t && tid < g_ntreg) {
+                const treg_t *r = &g_treg[tid];
+                int target = r->has_v && r->v.set_target ? r->v.target : r->t.d.target;
+                if (target == NVN_TEXTURE_TARGET_RECTANGLE) slots[aid] |= 4;
+            }
         } else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TEXU) {
             int tid = b->kind == NVN_RB_TEXU ? (int)(ubo_handle(nvn_stage, reg, b->off) & 0xfffff) : reg < 128 ? (int)(S.tex[nvn_stage][reg] & 0xfffff) : 0;
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
@@ -4100,6 +4110,7 @@ static int encode_args_to(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage,
             // does, rather than asking Metal to interpret another texture type.
             if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; t = tex_fit(tid, t, (MTLTextureType)b->dtt, &r2, sh->key, reg); trid = r2; }
             if (t && nvn_stage == 1 && afr_want(sh)) { uint64_t r2 = 0; id<MTLTexture> v = tex_alpha_red(tid, t, &r2); if (v) { t = v; trid = r2; } }   // see tex_alpha_red
+            if (t && b->runtime_class && pf_int_kind(t.pixelFormat) + 1 != b->runtime_class) t = nil;
             if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt & 7][b->dpf & 3]; }
             slots[aid] = trid;
             USE(t, MTLResourceUsageRead);

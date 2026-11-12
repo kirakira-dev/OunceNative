@@ -1,0 +1,55 @@
+--- a/src/shader_recompiler/environment.h
++++ b/src/shader_recompiler/environment.h
+@@ -90,6 +90,8 @@
+ 
+     [[nodiscard]] virtual bool PreserveNativeRootTables() const { return false; }
+ 
++    [[nodiscard]] virtual bool DeferSampledTextureFormats() const { return false; }
++
+     [[nodiscard]] virtual u32 LocalMemorySize() const = 0;
+ 
+     [[nodiscard]] virtual u32 SharedMemorySize() const = 0;
+--- a/src/shader_recompiler/nx2_offline.cpp
++++ b/src/shader_recompiler/nx2_offline.cpp
+@@ -151,6 +151,7 @@
+     u32 ReadViewportTransformState() override { return 1; }
+     u32 TextureBoundBuffer() const override { return texture_buffer; }
+     bool PreserveNativeRootTables() const override { return job.value("native_root_tables", false); }
++    bool DeferSampledTextureFormats() const override { return job.value("defer_sampled_texture_formats", false); }
+     u32 LocalMemorySize() const override { return stage == Shader::Stage::Compute ? job.at("local_memory").get<u32>() : static_cast<u32>(sph.LocalMemorySize()) + sph.common3.shader_local_memory_crs_size; }
+     u32 SharedMemorySize() const override { return job.value("shared", 0U); }
+     std::array<u32, 3> WorkgroupSize() const override { return job.value("local", std::array<u32,3>{1,1,1}); }
+@@ -268,6 +269,7 @@
+             }
+             if (job.contains("tessellation")) description["tessellation"] = job.at("tessellation");
+             if (env.native_root_table) description["native_root_table"] = {{"lowered_bank",17}, {"index",0}};
++            if (env.DeferSampledTextureFormats()) description["deferred_sampled_texture_formats"] = 1;
+             std::ofstream(stem.string() + ".json") << description.dump(2);
+             ++ok;
+             report << Json{{"key",key},{"status","ok"}}.dump() << '\n';
+--- a/src/shader_recompiler/ir_opt/texture_pass.cpp
++++ b/src/shader_recompiler/ir_opt/texture_pass.cpp
+@@ -774,7 +774,10 @@
+             inst->SetFlags(flags);
+             break;
+         case IR::Opcode::ImageSampleImplicitLod:
+-            if (flags.type != TextureType::Color2D) {
++            if (env.DeferSampledTextureFormats() && env.ShaderStage() != Stage::Fragment) {
++                throw NotImplementedException("Deferred non-fragment implicit texture sampling");
++            }
++            if (flags.type != TextureType::Color2D || env.DeferSampledTextureFormats()) {
+                 break;
+             }
+             if (ReadTextureTypeCached(env, cbuf) == TextureType::Color2DRect) {
+@@ -866,7 +869,10 @@
+                 });
+             } else {
+                 count = std::min(count, sampled_dynamic_cap);
+-                const bool is_integer{is_texture_pixel_format_integer(cbuf)};
++                // The offline Metal path preserves the raw register bits and selects
++                // the numeric type and rectangle coordinates from the live descriptor.
++                const bool is_integer{!env.DeferSampledTextureFormats() &&
++                                      is_texture_pixel_format_integer(cbuf)};
+                 index = descriptors.Add(TextureDescriptor{
+                     .type = flags.type,
+                     .is_depth = flags.is_depth != 0,

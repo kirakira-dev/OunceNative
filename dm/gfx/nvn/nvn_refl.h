@@ -8,16 +8,17 @@
 
 enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
        NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU,
-       NVN_RB_UNUSED_SAMP, NVN_RB_ROOT_CONSTANTS };
+       NVN_RB_UNUSED_SAMP, NVN_RB_ROOT_CONSTANTS, NVN_RB_TEX_FLAGS };
 // UBOP: device pointer of compute-stage uniform slot r (the Maxwell compute stage reads uniforms via the c0 address table + global memory)   // SAMPT: the sampler is taken from the combined handle of texture slot r (high bits = sampler ID)   // Binding kind (type in the json); IMG = writable texture (D3D u_r, NVN image slot r); TBUF = typed buffer (D3D t_r Buffer<T>, buffer texture in NVN texture slot r)
 enum { NVN_DPF_FLOAT = 0, NVN_DPF_UINT, NVN_DPF_SINT, NVN_DPF_DEPTH };            // Dummy texture pixel class (determined by msl_type)
 enum { NVN_CT_FLOAT = 0, NVN_CT_UINT, NVN_CT_INT };                               // Vertex input component type
-#define NVN_REFL_MAXB 64
+#define NVN_REFL_MAXB 128
 #define NVN_REFL_MAXV 32
 
 typedef struct {
     uint8_t kind, rw;        // rw: storage buffer or image access can write
     uint8_t dtt, dpf;        // Dummy texture when the texture slot is unbound: MTLTextureType value, pixel class
+    uint8_t runtime_class;   // 0 fixed; 1/2/3 selects float/uint/sint from the live descriptor.
     uint16_t reg, aid;       // D3D register number, index within the argument buffer
     uint16_t off;            // TEXU / SAMPU: byte offset of the handle within the uniform buffer
     uint16_t cb_span;        // Zero means the uniform read footprint is unknown.

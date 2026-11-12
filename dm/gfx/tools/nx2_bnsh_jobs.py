@@ -2,7 +2,8 @@
 """Select extracted NX2 programs that compile without external resource facts.
 
 The compiler must reject missing facts; this tool never supplies placeholder
-texture types, formats, descriptor handles, or runtime constant values.
+texture types, formats, descriptor handles, or runtime constant values. Sampled
+numeric formats can optionally be deferred to the native runtime's descriptors.
 """
 import argparse
 from collections import Counter
@@ -59,6 +60,8 @@ def main():
     ap.add_argument('compiler', type=Path, help='strict nx2-offline compiler')
     ap.add_argument('output', type=Path, help='new output directory')
     ap.add_argument('--exclude-map', type=Path, help='skip keys already in a shader_map.tsv')
+    ap.add_argument('--runtime-texture-formats', action='store_true',
+                    help='defer sampled numeric formats to the native Metal binding transform')
     args = ap.parse_args()
     root = args.extracted.resolve()
     index = json.loads((root / 'index.json').read_text())
@@ -72,6 +75,9 @@ def main():
                 exclude.add(fields[3])
     jobs = [job for key, record in sorted(index['programs'].items())
             if key not in exclude and (job := make_job(root, key, record)) is not None]
+    if args.runtime_texture_formats:
+        for job in jobs:
+            job['defer_sampled_texture_formats'] = True
     args.output.mkdir(parents=True, exist_ok=False)
     source = args.output / 'all-jobs.json'
     source.write_text(json.dumps(jobs, indent=2))

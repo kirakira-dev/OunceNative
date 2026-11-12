@@ -2,7 +2,7 @@
 
 Based on [PokeDinner](https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork) commit `1dd40d86df4bca1b68700091fe5ddb71a13162b2`.
 
-`nx2-compiler.patch` adds the offline NX2 compiler, Ampere instruction fixes, native root constants, and regression tests for quad gradients and half-precision texture component order. Apply `scalar-modes.patch` after it to add signed and uniform halfword-to-float conversion and direct/indexed uniform byte loads, then `uniform-clamp.patch` to recognize jump-table bounds across independent integer additions. `reference-tools.patch` adds opt-in shader facts, frame capture, and CPU probes used to compare the native runtime with the emulator.
+`nx2-compiler.patch` adds the offline NX2 compiler, Ampere instruction fixes, native root constants, and regression tests for quad gradients and half-precision texture component order. Apply `scalar-modes.patch` after it to add signed and uniform halfword-to-float conversion and direct/indexed uniform byte loads, then `uniform-clamp.patch` to recognize jump-table bounds across independent integer additions. `runtime-textures.patch` lets the native Metal binding transform select sampled numeric formats from live descriptors. `reference-tools.patch` adds opt-in shader facts, frame capture, and CPU probes used to compare the native runtime with the emulator.
 
 These patches use GPL-3.0-or-later, matching PokeDinner. They are built separately from the native runtime.
 
@@ -17,6 +17,7 @@ git -C "$POKEDINNER" checkout 1dd40d86df4bca1b68700091fe5ddb71a13162b2
 git -C "$POKEDINNER" apply "$PWD/patches/pokedinner/nx2-compiler.patch"
 git -C "$POKEDINNER" apply "$PWD/patches/pokedinner/scalar-modes.patch"
 git -C "$POKEDINNER" apply "$PWD/patches/pokedinner/uniform-clamp.patch"
+git -C "$POKEDINNER" apply "$PWD/patches/pokedinner/runtime-textures.patch"
 cmake -S "$POKEDINNER" -B "$POKEDINNER/build" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
   -DENABLE_QT=OFF -DENABLE_WEB_SERVICE=OFF -DYUZU_ROOM=OFF \
@@ -63,3 +64,18 @@ clang++ -std=c++17 -O2 dm/gfx/tools/dmsh_nx2_msl.cpp \
 ```
 
 Pass the resulting path to the archive tools' `--wrapper` option.
+
+## Runtime sampled texture formats
+
+`nx2_bnsh_jobs.py --runtime-texture-formats` sets the offline job's `defer_sampled_texture_formats` option. It keeps sampled values as raw float-shaped registers and marks the output metadata with `deferred_sampled_texture_formats: 1`. This SPIR-V requires `dmsh_nx2_build.py`'s Metal transform; it is not a standalone float-format assumption. The transform emits float, unsigned, and signed texture arguments and selects the actual operation using the bound NVN descriptor. Integer bits remain unchanged, including values that look like floating-point NaNs. Implicit 2D fragment samples also obtain rectangle coordinate behavior from the texture or its view.
+
+Texture dimension queries, 1D/buffer distinctions, storage image formats, and non-fragment implicit sampling still require facts or reject unsupported translation. The default compiler mode retains its captured-fact behavior. No placeholder descriptors or numeric formats are supplied to archive jobs.
+
+The native regression runs through both Metal 4 and legacy argument encoding:
+
+```sh
+make -C dm/gfx/tests GAME=0400380020056000 t_runtime_textures
+python3 dm/gfx/tests/test_runtime_textures.py
+```
+
+It checks 70 descriptor rebindings across 2D, 2D array, and cube array textures in seven numeric formats; 13,440 exact sample, fetch, gather, gradient, and dimension-query values; and 8,960 output guard words. It exercises rectangle texture/view coordinates, argument reuse, layer/face selection, signed extension, and invalid reflection metadata. The compiler patch also reproduces all three modified source files from the preceding patch set. In the owned Raiders archive, 98 of 103 recovered programs still missing from older gameplay logs now compile through SPIR-V validation and Metal; five continue to reject missing descriptor facts.

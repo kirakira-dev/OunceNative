@@ -148,12 +148,17 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         if (![bs isKindOfClass:[NSArray class]]) FAIL("missing bindings");
         if (bs.count > NVN_REFL_MAXB) FAIL("%lu bindings, over the limit %d", (unsigned long)bs.count, NVN_REFL_MAXB);
         o->route_b = 1; o->abi = 0;   // spirv-cross set 0 → [[buffer(0)]]
-        uint64_t argument_ids = 0;
+        NSDictionary *runtime_formats = j[@"runtime_texture_formats"];
+        if (runtime_formats && (![runtime_formats isKindOfClass:NSDictionary.class] ||
+            !tess_uint(runtime_formats[@"version"], 1) || [runtime_formats[@"version"] intValue] != 1))
+            FAIL("invalid runtime texture format contract");
+        uint8_t argument_ids[NVN_REFL_MAXB] = {0};
+        uint8_t runtime_classes[128] = {0}, runtime_flags[128] = {0}, runtime_types[128] = {0};
         for (NSDictionary *b in bs) {
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
             id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];
-            if (!tess_uint(b[@"arg_id"],NVN_REFL_MAXB-1) || (argument_ids & (1ull << aid))) FAIL("invalid or duplicated argument ID");
-            argument_ids |= 1ull << aid;
+            if (!tess_uint(b[@"arg_id"],NVN_REFL_MAXB-1) || argument_ids[aid]) FAIL("invalid or duplicated argument ID");
+            argument_ids[aid] = 1;
             r->aid = (uint16_t)aid; r->reg = reg < 0 ? 0 : (uint16_t)reg;
             if ([k isEqualToString:@"cbuf"]) r->kind = NVN_RB_CBUF;
             else if ([k isEqualToString:@"samp"]) r->kind = NVN_RB_SAMP;
@@ -173,7 +178,22 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@"c1"]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@"drvcb"]) r->kind = [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else if ([k isEqualToString:@"root_constants"]) { if (reg < 0 || reg >= 8) FAIL("invalid NX2 root table index"); r->kind = NVN_RB_ROOT_CONSTANTS; }
+            else if ([k isEqualToString:@"tex_flags"]) {
+                if (!runtime_formats || !tess_uint(rg, 127) || ![b[@"msl_type"] isEqual:@"ulong"] || runtime_flags[reg])
+                    FAIL("invalid runtime texture flags");
+                r->kind = NVN_RB_TEX_FLAGS;
+                runtime_flags[reg] = 1;
+            }
             else FAIL("B binding kind %s not implemented (%s)", k.UTF8String, [b[@"msl_name"] UTF8String]);
+            if (b[@"runtime_class"]) {
+                if (!runtime_formats || r->kind != NVN_RB_TEX || !tess_uint(b[@"runtime_class"], 2) ||
+                    [b[@"runtime_class"] intValue] != r->dpf || !tess_uint(rg, 127) ||
+                    ![b[@"msl_type"] hasPrefix:@"texture"] || (runtime_classes[reg] & (1u << r->dpf)) ||
+                    (runtime_types[reg] && runtime_types[reg] != r->dtt + 1))
+                    FAIL("invalid runtime texture numeric class");
+                r->runtime_class = r->dpf + 1;
+                runtime_classes[reg] |= 1u << r->dpf; runtime_types[reg] = r->dtt + 1;
+            }
             if (b[@"read_words"]) {
                 NSArray *words = b[@"read_words"];
                 if (r->kind != NVN_RB_CBUF || ![words isKindOfClass:NSArray.class] || !words.count || words.count > 256)
@@ -189,6 +209,9 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 FAIL("B binding %s has no resolved slot number", [b[@"msl_name"] UTF8String]);
             o->nb++;
         }
+        for (unsigned reg = 0; reg < 128; reg++)
+            if ((runtime_classes[reg] || runtime_flags[reg]) && (runtime_classes[reg] != 7 || !runtime_flags[reg]))
+                FAIL("incomplete runtime texture numeric classes");
         NSDictionary *dr = j[@"drv_reads"];
         if ([dr isKindOfClass:[NSDictionary class]]) { o->drv_read[0] = dr[@"0"] != nil; o->drv_read[2] = dr[@"2"] != nil; }
         // A declared driver-segment binding means the shader reads it: the build's drv_reads scan (dmsh_build.py) matches only fragment-shader names (fp_c0 / fp_c2), so vertex and compute

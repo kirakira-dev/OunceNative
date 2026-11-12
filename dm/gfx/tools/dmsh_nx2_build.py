@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 from dmsh_nx2_spirv import prepare as prepare_spirv, toolchain_provenance as bank_provenance
+from dmsh_nx2_textures import runtime_texture_formats
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent.parent / 'games'))
@@ -499,6 +500,10 @@ def main():
             src = integer_vertex_inputs(src)
         layout = compute_layout(Path(job['control']).read_bytes()) if stage == 5 else None
         reflection = describe(src, stage, meta, layout)
+        if meta.get('deferred_sampled_texture_formats'):
+            if meta['deferred_sampled_texture_formats'] != 1:
+                raise ValueError('unsupported deferred texture contract')
+            src = runtime_texture_formats(src, reflection, stage)
         if bank_proofs:
             reflection['nx2_constant_bank_proofs'] = bank_proofs
         c1_size = struct.unpack_from('<I', Path(job['control']).read_bytes(), 0x3c)[0]
@@ -536,6 +541,7 @@ def main():
                           ('nvn_refl.h', 'nvn_refl.m', 'nvn_mtl.m', 'nvn_raytrace.h',
                            'nvn_raytrace.m', 'nvn_raytrace_source.m', 'nvn_raytrace_scene.inc')},
                       builder_sha256=sha(__file__), spirv_cross_sha256=sha(shutil.which('spirv-cross')),
+                      texture_transform_sha256=sha(HERE/'dmsh_nx2_textures.py'),
                       metal_version=run(['xcrun', '-sdk', 'macosx', 'metal', '--version']),
                       metal_options=['-std=metal3.2', '-c', '-fpreserve-invariance', '-fno-fast-math'],
                       spirv_cross_options=XC, jobs_sha256=sha(selected_file),

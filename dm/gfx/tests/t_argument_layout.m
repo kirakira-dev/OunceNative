@@ -42,7 +42,7 @@ int main(int argc,char **argv){@autoreleasepool{
     }
     NSMutableDictionary *json=[@{@"route":@"B",@"stage":@"compute",@"bindings":@[@{@"kind":@"unused_sampler",@"arg_id":@0,@"msl_type":@"sampler"}]} mutableCopy];
     nvn_refl reflection;char why[256];CHECK(!nvn_refl_from_json(json,&reflection,why,sizeof why));
-    for(id aid in @[@(-1),@64,@0.5,@"0"]){json[@"bindings"]=@[@{@"kind":@"unused_sampler",@"arg_id":aid,@"msl_type":@"sampler"}];CHECK(nvn_refl_from_json(json,&reflection,why,sizeof why));}
+    for(id aid in @[@(-1),@(NVN_REFL_MAXB),@0.5,@"0"]){json[@"bindings"]=@[@{@"kind":@"unused_sampler",@"arg_id":aid,@"msl_type":@"sampler"}];CHECK(nvn_refl_from_json(json,&reflection,why,sizeof why));}
     NSDictionary *binding=@{@"kind":@"unused_sampler",@"arg_id":@0,@"msl_type":@"sampler"};json[@"bindings"]=@[binding,binding];CHECK(nvn_refl_from_json(json,&reflection,why,sizeof why));
     json[@"bindings"]=@[binding];json[@"stage"]=@"vertex";CHECK(nvn_refl_from_json(json,&reflection,why,sizeof why));
     mtl_pool_del(memory);free(memory);

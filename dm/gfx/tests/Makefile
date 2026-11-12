@@ -97,6 +97,8 @@ t_cond_render: t_cond_render.m ../../host/crash.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cond_render.m ../../host/crash.c $(filter-out ../nvn/nvn_mtl.m ../nvn/nvn_entry.S ../nvn/nvn_thunks.S,$(GFX)) $(FW)
 t_sampling_views: t_sampling_views.m ../../host/crash.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sampling_views.m ../../host/crash.c $(filter-out ../nvn/nvn_mtl.m ../nvn/nvn_entry.S ../nvn/nvn_thunks.S,$(GFX)) $(FW)
+t_runtime_textures: t_runtime_textures.m ../../host/crash.c $(GFX) $(GFX_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_runtime_textures.m ../../host/crash.c $(filter-out ../nvn/nvn_mtl.m ../nvn/nvn_entry.S ../nvn/nvn_thunks.S,$(GFX)) $(FW)
 t_vertex_fetch.metallib: t_vertex_fetch.metal
 	xcrun -sdk macosx metal -c -fpreserve-invariance -fno-fast-math $< -o t_vertex_fetch.air
 	xcrun -sdk macosx metallib t_vertex_fetch.air -o $@
