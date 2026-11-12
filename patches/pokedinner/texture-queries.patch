@@ -2,12 +2,12 @@
 +++ b/src/shader_recompiler/environment.h
 @@ -91,6 +91,7 @@
      [[nodiscard]] virtual bool PreserveNativeRootTables() const { return false; }
- 
+
      [[nodiscard]] virtual bool DeferSampledTextureFormats() const { return false; }
 +    [[nodiscard]] virtual bool DeferTextureQueries() const { return false; }
- 
+
      [[nodiscard]] virtual u32 LocalMemorySize() const = 0;
- 
+
 --- a/src/shader_recompiler/nx2_offline.cpp
 +++ b/src/shader_recompiler/nx2_offline.cpp
 @@ -152,6 +152,7 @@
@@ -42,14 +42,14 @@
      u32 count;
      bool is_written;
 +    bool is_texture_query{}; // Runtime dimension record; cbuf fields locate the texture handle.
- 
+
      auto operator<=>(const StorageBufferDescriptor&) const = default;
  };
 --- a/src/shader_recompiler/ir_opt/texture_pass.cpp
 +++ b/src/shader_recompiler/ir_opt/texture_pass.cpp
 @@ -766,6 +766,44 @@
          inst->ReplaceOpcode(IndexedInstruction(*inst));
- 
+
          const auto& cbuf{texture_inst.cbuf};
 +        if (env.DeferTextureQueries() && inst->GetOpcode() == IR::Opcode::ImageQueryDimensions) {
 +            if (cbuf.count != 1 || cbuf.has_secondary || cbuf.shift_left != 0) {
