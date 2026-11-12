@@ -14,6 +14,32 @@ The README covers packing and playing. This page is for working on ouncenative: 
 | iOS app | One unsigned IPA for iPhone and iPad. The rewritten code is embedded in the executable; the shader libraries, the RomFS and the game icon are inside the app |
 | Known gaps | Conditional render is always drawn; sparse virtual-pool mappings; `MultiDraw*IndirectCount`. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. The bundled prewarm lists are empty. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
 
+## Adaptive windowless testing
+
+For adaptive windowless testing on Mac, create a FIFO with `mkfifo /tmp/native-control`
+and launch an isolated test host with `DM_TEST_CONTROL=/tmp/native-control`.
+`DM_TEST_CONTROL_START=16000` lets an initial `DM_KEYS` route run before the frame
+gate starts. Without this option the gate starts at the first presented frame.
+At the gate the host releases its diagnostic input and freezes the guest clock;
+each command advances a bounded number of presented frames before pausing again.
+Finish any scripted holds before that gate, and use a separate save directory.
+
+```sh
+python3 scripts/test_control.py --fifo /tmp/native-control --log /tmp/native.log \
+  --frames 30 --buttons ZR --left 0 1 --output /tmp/after-movement.png
+```
+
+Axes range from -1 to 1, with positive Y pointing up. `--motion PITCH YAW` applies
+a single virtual gyro rotation in radians. The driver adds four neutral frames
+and requests a screenshot, then writes a JSON record beside the image. Use
+`--settle 30` to allow another 30 neutral frames before capturing (for camera
+settling, for example). Omitting
+`--frames` captures the current scene. `DM_NVN_SHOT_OUT=1920x1080` applies the
+normal display crop/scaling. The channel is opt-in and absent from normal app
+operation; paused runs and screenshot stalls are unsuitable for performance
+measurements. Stop the test host normally when finished. The FIFO regression is
+`make -C dm/host/tests GAME=<profile> test-control`.
+
 ## The packing script in detail
 
 `scripts/build_ipa_from_nsp.py` (`-h` lists every option):

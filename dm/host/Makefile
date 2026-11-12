@@ -16,7 +16,7 @@ endif
 GAME_H = gen/$(GAME)/game_profile.h
 CFLAGS=$(if $(filter 0400380020056000,$(GAME)),-O2,-O1) -g -Wall -Wno-unused-function
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
-SRC=main.c loader.c hle.c host_stubs.c crash.c probe.c thread.c memstat.m ../ios/Sources/dm_touch_controls.c $(sort $(wildcard hle_*.c)) front_mac.m settings_mac.m entry.S dm_i18n.c dm_motion.c dm_motion_gamecontroller.m
+SRC=main.c loader.c hle.c host_stubs.c crash.c probe.c thread.c memstat.m ../ios/Sources/dm_touch_controls.c $(sort $(wildcard hle_*.c)) front_mac.m settings_mac.m entry.S dm_i18n.c dm_motion.c dm_motion_gamecontroller.m dm_test_control.c
 # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)
 # Sources under dm/gfx, dm/gfx/nvn, dm/gfx/tex and dm/gfx/vk are included by wildcard (tests/ and metal/ do not go into the host): adding a file does not touch this line
 GFX=$(sort $(wildcard ../gfx/*.c ../gfx/nvn/*.c ../gfx/nvn/*.m ../gfx/nvn/*.S ../gfx/tex/*.c ../gfx/tex/*.m ../gfx/vk/*.m))

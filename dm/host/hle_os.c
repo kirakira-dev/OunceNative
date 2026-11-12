@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include "hle.h"
 #include <mach/mach_time.h>
+#include <TargetConditionals.h>
 #include <stdatomic.h>
 
 // ---------- Side table ----------
@@ -70,7 +71,13 @@ static void det_on_uimsg(const char *cat, const char *act, const char *arg) {
 }
 void dm_guest_frame_tick(void) {
     crash_watch_frame();
-    atomic_fetch_add(&g_guest_frame, 1);
+    uint64_t frame = atomic_fetch_add(&g_guest_frame, 1) + 1;
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+    void dm_test_control_frame(uint64_t frame);
+    dm_test_control_frame(frame);
+#else
+    (void)frame;
+#endif
     if (!detclock_cfg()) return;
     if (!atomic_load(&g_gdet_on)) {
         atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);
@@ -83,7 +90,7 @@ static void guest_clock_freeze_apply(int on) {
     if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); }
     else if (!on && atomic_load(&g_gfz)) { atomic_store(&g_glag, now_ns() - atomic_load(&g_gfrozen)); atomic_store(&g_gfz, 0); }
 }
-// Freezing has several unrelated reasons (0 freeze tick for testing / loading screen, 1 App in background, 2 system keyboard up): freeze if any holds, release only when all are lifted --
+// Freezing has several unrelated reasons (0 freeze tick for testing / loading screen, 1 App in background, 2 system keyboard up, 3 diagnostic frame gate): freeze if any holds, release only when all are lifted --
 // otherwise "switch to background and back while the keyboard is up" would be released early by the unfreeze on returning to foreground
 static pthread_mutex_t g_gfz_mu = PTHREAD_MUTEX_INITIALIZER; static unsigned g_gfz_reasons;
 void guest_clock_freeze_for(int reason, int on) {
