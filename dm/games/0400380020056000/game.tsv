@@ -30,4 +30,4 @@ shader_groups	/Shader/=shader /Layout/=layout /Effect/=effect /Pack/=pack
 shader_note	Raiders NX2 capture pipeline: resource types come from measured native bindings
 build	v0	unknown	main=abb30e2fb1cdf3bf618a0da346b6e427	subsdk0=07e685d1c23a77a389fd205288ae904c	sdk=41d4de4a3b78214ad20c896960df0e5e
 build	v65536	unknown	main=663c2e087a083f05307f229dfc4042d5	subsdk0=07e685d1c23a77a389fd205288ae904c	sdk=41d4de4a3b78214ad20c896960df0e5e
-shader_nx2_chain	778fdccda7355fd3411d4cf69dcb4c371820211a17b6ee3c0814a3ad4fbb1d67
+shader_nx2_chain	3dd0e6097d2b9239c3b19e8ac609fce460542c31de7bffe36aa7720979a25b73
