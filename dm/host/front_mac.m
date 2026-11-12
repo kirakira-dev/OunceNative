@@ -127,6 +127,31 @@ static uint64_t g_pad_btn;
 static uint64_t g_mouse_btn;
 static int g_mouse_captured;
 static NSWindow *g_mouse_window;
+// Called by the optional graphics launch gate on a guest thread. UI work always
+// stays on the main queue, so the window can move or close during preparation.
+void dm_gfx_prepare_progress(int active, unsigned done, unsigned total) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        static NSTextField *status;
+        if (!active) { [status removeFromSuperview]; status = nil; return; }
+        NSView *view = g_mouse_window.contentView;
+        if (!view) return;
+        if (!status) {
+            status = [NSTextField labelWithString:@""];
+            status.font = [NSFont systemFontOfSize:18 weight:NSFontWeightMedium];
+            status.textColor = NSColor.whiteColor;
+            status.backgroundColor = [NSColor colorWithWhite:0.08 alpha:0.95];
+            status.drawsBackground = YES; status.alignment = NSTextAlignmentCenter;
+            status.translatesAutoresizingMaskIntoConstraints = NO;
+            [view addSubview:status];
+            [NSLayoutConstraint activateConstraints:@[
+                [status.centerXAnchor constraintEqualToAnchor:view.centerXAnchor],
+                [status.centerYAnchor constraintEqualToAnchor:view.centerYAnchor],
+                [status.widthAnchor constraintEqualToConstant:360],
+                [status.heightAnchor constraintEqualToConstant:48]]];
+        }
+        status.stringValue = total ? [NSString stringWithFormat:@"Preparing graphics… %u%%", (unsigned)((uint64_t)done * 100 / total)] : @"Preparing graphics…";
+    });
+}
 static NSPoint g_mouse_location;
 static int32_t g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;

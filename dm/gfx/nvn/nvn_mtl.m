@@ -55,6 +55,7 @@ _Static_assert(DM_GAME_NVN_TEX_SLOTS <= 128 && DM_GAME_NVN_IMG_SLOTS <= 32 && DM
 static void sampling_view_stats(void);
 static void warm_start(void);
 static void warm_claim(void);
+static void warm_startup_wait(void);
 
 static id<MTLDevice> g_dev;
 static NSMutableArray *g_l3_gpu_leaks;
@@ -2436,6 +2437,7 @@ static void shmap_load(void) {
     }
     MLOG("shader route B (translated Switch originals): shader map %lu entries (%s), metallib directory %s", (unsigned long)g_shmap.count, path.UTF8String, g_msl_dir.UTF8String);
     warm_start();
+    warm_startup_wait();
 }
 
 #include "nvn_raytrace.h"
@@ -2518,6 +2520,9 @@ static id<MTLFunction> color_specialize(NvShader *sh, uint32_t types, uint32_t i
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs are strong references (in pso they are only raw pointers, and the background dictionary is released when the task ends)
 @interface WarmItem : NSObject { @public int kind; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end
 @implementation WarmItem @end
+// A shader has one loader even when several pipeline workers need it at once.
+@interface WarmShader : NSObject { @public NvShader *shader; dispatch_group_t ready; int stage; } @end
+@implementation WarmShader @end
 static NSMutableDictionary<NSString *, NvShader *> *g_shcache;
 
 static void c1_store(NvShader *o) {
@@ -2563,7 +2568,8 @@ static _Atomic int g_warm_ready;
 static int g_warm_started;
 static uint64_t g_warm_t0;
 static _Atomic int g_warm_running;   // Background warm-up has not finished yet (the loading screen on entering a run waits a little longer based on this, see mtl_warm_wait)
-static uint64_t g_warm_shaders, g_warm_rps, g_warm_cps, g_warm_skip_fz;
+static _Atomic uint64_t g_warm_shaders, g_warm_rps, g_warm_cps, g_warm_skip_fz;
+static _Atomic unsigned g_warm_done, g_warm_total;
 static uint64_t g_warm_claim_shaders, g_warm_claim_rps, g_warm_claim_cps;
 static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap);
 static int rt_range_bindings_ro(NSDictionary *j);
@@ -3580,15 +3586,16 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vfetch_for_pso(vs, k); d.fragmentFunction = fsfn ? fsfn : color_for_pso(fs, vs, k);
     // Diagnostic DM_NVN_HILITE=fragment shader key,...: these draws use a solid-color fragment instead (keys 1–6 in order magenta / green / cyan / yellow / blue / white), to see where the geometry lands
-    if (fs) { static char keys[6][24]; static int nk = -1; static id<MTLLibrary> hl;
-        if (nk < 0) { nk = 0; const char *e = getenv("DM_NVN_HILITE");
-            for (const char *q = e; q && *q && nk < 6; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 23) n = 23; memcpy(keys[nk], q, n); keys[nk++][n] = 0; } }
+    if (fs) { static char keys[6][24]; static int nk; static id<MTLLibrary> hl; static dispatch_once_t keys_once;
+        dispatch_once(&keys_once, ^{ const char *e = getenv("DM_NVN_HILITE");
+            for (const char *q = e; q && *q && nk < 6; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 23) n = 23; memcpy(keys[nk], q, n); keys[nk++][n] = 0; } });
         for (int i = 0; i < nk; i++) if (!strncmp(fs->key, keys[i], strlen(keys[i]))) {
-            if (!hl) { NSError *e = nil; hl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nstruct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; };\n"
+            static dispatch_once_t library_once;
+            dispatch_once(&library_once, ^{ NSError *e = nil; hl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nstruct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; };\n"
                 "fragment O hl0() { return {float4(1,0,1,1),float4(1,0,1,1),float4(1,0,1,1)}; } fragment O hl1() { return {float4(0,1,0,1),float4(0,1,0,1),float4(0,1,0,1)}; }\n"
                 "fragment O hl2() { return {float4(0,1,1,1),float4(0,1,1,1),float4(0,1,1,1)}; } fragment O hl3() { return {float4(1,1,0,1),float4(1,1,0,1),float4(1,1,0,1)}; }\n"
                 "fragment O hl4() { return {float4(0,0,1,1),float4(0,0,1,1),float4(0,0,1,1)}; } fragment O hl5() { return {float4(1,1,1,1),float4(1,1,1,1),float4(1,1,1,1)}; }\n" options:nil error:&e];
-                if (!hl) MLOG("[RED] HILITE shader compile failed %s", e.localizedDescription.UTF8String); }
+                if (!hl) MLOG("[RED] HILITE shader compile failed %s", e.localizedDescription.UTF8String); });
             if (hl) d.fragmentFunction = [hl newFunctionWithName:[NSString stringWithFormat:@"hl%d", i]];
             break; } }
     d.rasterSampleCount = k->samples ? k->samples : 1;
@@ -3724,10 +3731,19 @@ static NSString *warm_key(const char *s, size_t n) {
     size_t z = strnlen(s, n);
     return [[NSString alloc] initWithBytes:s length:z encoding:NSUTF8StringEncoding];
 }
-static NvShader *warm_shader(NSMutableDictionary<NSString *, NvShader *> *dict, NSString *key, int stage) {
-    NvShader *sh = dict[key];
-    if (!sh) { sh = shader_load(key, stage); if (sh) dict[key] = sh; }
-    return sh;
+static NvShader *warm_shader(NSMutableDictionary<NSString *, WarmShader *> *dict, NSString *key, int stage) {
+    WarmShader *slot; BOOL load = NO;
+    @synchronized(dict) {
+        slot = dict[key];
+        if (!slot) {
+            slot = [WarmShader new]; slot->stage = stage; slot->ready = dispatch_group_create();
+            dispatch_group_enter(slot->ready); dict[key] = slot; load = YES;
+        }
+    }
+    if (slot->stage != stage) { MLOG("[RED] inconsistent prewarm stage for %s", key.UTF8String); return nil; }
+    if (load) { slot->shader = shader_load(key, stage); dispatch_group_leave(slot->ready); }
+    else dispatch_group_wait(slot->ready, DISPATCH_TIME_FOREVER);
+    return slot->shader;
 }
 static void warm_enqueue(WarmItem *item) {
     os_unfair_lock_lock(&g_warm_lock);
@@ -3735,10 +3751,44 @@ static void warm_enqueue(WarmItem *item) {
     atomic_store_explicit(&g_warm_ready, 1, memory_order_release);
     os_unfair_lock_unlock(&g_warm_lock);
 }
+static void warm_row(NSArray<NSString *> *c, NSMutableDictionary<NSString *, WarmShader *> *dict) {
+    if ([c[0] isEqualToString:@"S"] && c.count >= 3) {
+        NSString *key = c[1]; NvShader *sh = warm_shader(dict, key, c[2].intValue);
+        if (!sh) { return; }
+        WarmItem *item = [WarmItem new]; item->kind = 0; item->key = key; item->shader = sh;
+        warm_enqueue(item); g_warm_shaders++;
+    } else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
+        pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) { return; }
+        NSString *vkey = warm_key(sk.vs, sizeof sk.vs), *fkey = warm_key(sk.fs, sizeof sk.fs);
+        NvShader *vs = vkey.length ? warm_shader(dict, vkey, sk.vs_stage) : nil;
+        NvShader *fs = fkey.length ? warm_shader(dict, fkey, sk.fs_stage) : nil;
+        if (!vs || (fkey.length && !fs)) { return; }
+        id<MTLFunction> fsfn = nil;
+        if (sk.fz) {
+            if (sk.fz_desc.kind == 1 && fs) { int fx[32]; for (int i = 0; i < 32; i++) fx[i] = sk.fz_desc.fx[i]; @synchronized(fs) { fsfn = bf_fn(fs, fx, sk.fz_desc.fbmask, sk.k.lmap); } }
+            if (!fsfn) { g_warm_skip_fz++; return; }
+        }
+        pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)fsfn;
+        NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithDescriptor:pso_desc(&k, vs, fs, fsfn, sk.merged) error:&e];
+        if (!ps) { MLOG("[RED] background render pipeline creation failed: %s", e.localizedDescription.UTF8String); return; }
+        WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = vkey; item->fs_key = fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
+        warm_enqueue(item); g_warm_rps++;
+    } else if ([c[0] isEqualToString:@"C"] && c.count >= 2) {
+        NSString *key = c[1]; if (!key.length) { return; }
+        NvShader *cs = warm_shader(dict, key, 5);
+        if (!cs) { return; }
+        NSError *e = nil; id ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
+        if (!ps) { MLOG("[RED] background compute pipeline creation failed: %s", e.localizedDescription.UTF8String); return; }
+        WarmItem *item = [WarmItem new]; item->kind = 2; item->key = key; item->shader = cs; item->object = ps;
+        warm_enqueue(item); g_warm_cps++;
+    }
+}
 static void warm_worker(NSArray<NSString *> *paths) {
     @autoreleasepool {
-        NSMutableDictionary<NSString *, NvShader *> *dict = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, WarmShader *> *dict = [NSMutableDictionary dictionary];
         NSMutableSet<NSString *> *seen = [NSMutableSet set];
+        NSMutableArray<NSArray<NSString *> *> *rows = [NSMutableArray array];
+        unsigned invalid = 0;
         for (NSString *path in paths) {
             NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
             if (!txt) { MLOG("[RED] cannot read prewarm list: %s", path.UTF8String); continue; }
@@ -3748,43 +3798,53 @@ static void warm_worker(NSArray<NSString *> *paths) {
                 if (!line.length || [line hasPrefix:@"#"] || [seen containsObject:line]) continue;
                 [seen addObject:line];
                 NSArray<NSString *> *c = [line componentsSeparatedByString:@"\t"];
-                if (!c.count) continue;
-                if ([c[0] isEqualToString:@"S"] && c.count >= 3) {
-                    NSString *key = c[1]; NvShader *sh = warm_shader(dict, key, c[2].intValue);
-                    if (!sh) continue;
-                    WarmItem *item = [WarmItem new]; item->kind = 0; item->key = key; item->shader = sh;
-                    warm_enqueue(item); g_warm_shaders++;
-                } else if ([c[0] isEqualToString:@"R"] && c.count >= 2) {
-                    pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) continue;
-                    NSString *vkey = warm_key(sk.vs, sizeof sk.vs), *fkey = warm_key(sk.fs, sizeof sk.fs);
-                    NvShader *vs = vkey.length ? warm_shader(dict, vkey, sk.vs_stage) : nil;
-                    NvShader *fs = fkey.length ? warm_shader(dict, fkey, sk.fs_stage) : nil;
-                    if (!vs || (fkey.length && !fs)) continue;
-                    id<MTLFunction> fsfn = nil;
-                    if (sk.fz) {
-                        if (sk.fz_desc.kind == 1 && fs) { int fx[32]; for (int i = 0; i < 32; i++) fx[i] = sk.fz_desc.fx[i]; fsfn = bf_fn(fs, fx, sk.fz_desc.fbmask, sk.k.lmap); }
-                                                if (!fsfn) { g_warm_skip_fz++; continue; }
-                    }
-                    pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)fsfn;
-                    NSError *e = nil; id ps = [g_dev newRenderPipelineStateWithDescriptor:pso_desc(&k, vs, fs, fsfn, sk.merged) error:&e];
-                    if (!ps) { MLOG("[RED] background render pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
-                    WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = vkey; item->fs_key = fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
-                    warm_enqueue(item); g_warm_rps++;
-                } else if ([c[0] isEqualToString:@"C"] && c.count >= 2) {
-                    NSString *key = c[1]; if (!key.length) continue;
-                    NvShader *cs = warm_shader(dict, key, 5);
-                    if (!cs) continue;
-                    NSError *e = nil; id ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
-                    if (!ps) { MLOG("[RED] background compute pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
-                    WarmItem *item = [WarmItem new]; item->kind = 2; item->key = key; item->shader = cs; item->object = ps;
-                    warm_enqueue(item); g_warm_cps++;
+                if ([c[0] isEqualToString:@"R"]) {
+                    pso_skey sk;
+                    if (c.count < 2 || pso_skey_parse(c[1].UTF8String, &sk)) { invalid++; continue; }
                 }
+                [rows addObject:c];
             }
         }
+        if (invalid) MLOG("pipeline prewarm: skipped %u incompatible render keys (expected %zu bytes)", invalid, sizeof(pso_skey));
+        atomic_store(&g_warm_total, (unsigned)rows.count);
+        unsigned workers = 1;
+        const char *e = getenv("DM_PSO_WORKERS");
+        if (e) { int n = atoi(e); if (n >= 1 && n <= 8) workers = (unsigned)n; }
+        MLOG("pipeline prewarm: %lu unique rows, %u workers", (unsigned long)rows.count, workers);
+        __block _Atomic unsigned next = 0;
+        dispatch_apply(workers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t worker) {
+            (void)worker;
+            for (;;) {
+                unsigned index = atomic_fetch_add(&next, 1);
+                if (index >= rows.count) break;
+                @autoreleasepool {
+                    warm_row(rows[index], dict);
+                    atomic_fetch_add(&g_warm_done, 1);
+                }
+            }
+        });
         MLOG("pipeline prewarm done: shaders %llu / render pipelines %llu (specialized fragment skipped %llu) / compute pipelines %llu, background time %.1f ms",
              g_warm_shaders, g_warm_rps, g_warm_skip_fz, g_warm_cps, (bp_now() - g_warm_t0) / 1e6);
     }
     atomic_store(&g_warm_running, 0);
+}
+__attribute__((weak)) void dm_gfx_prepare_progress(int active, unsigned done, unsigned total) { (void)active; (void)done; (void)total; }
+// Optional launch gate, before the first shader is consumed. The guest render thread
+// waits while AppKit stays responsive; a timeout falls back to ordinary background warm-up.
+static void warm_startup_wait(void) {
+    const char *e = getenv("DM_PSO_STARTUP_WAIT_MS");
+    int timeout = e ? atoi(e) : 0;
+    if (timeout <= 0 || !atomic_load(&g_warm_running)) return;
+    if (timeout > 120000) timeout = 120000;
+    uint64_t t0 = bp_now();
+    do {
+        dm_gfx_prepare_progress(1, atomic_load(&g_warm_done), atomic_load(&g_warm_total));
+        usleep(100000);
+    } while (atomic_load(&g_warm_running) && (bp_now() - t0) / 1000000ull < (uint64_t)timeout);
+    dm_gfx_prepare_progress(0, atomic_load(&g_warm_done), atomic_load(&g_warm_total));
+    warm_claim();
+    MLOG("pipeline startup preparation: %.1f ms, %u/%u rows%s", (bp_now() - t0) / 1e6,
+         atomic_load(&g_warm_done), atomic_load(&g_warm_total), atomic_load(&g_warm_running) ? " (timeout; continuing in background)" : "");
 }
 // Wait for the background warm-up to finish (at most timeout_ms): returns how many milliseconds were actually waited, 0 if it is not running. On first install the system shader cache is fully cold; if warm-up is slower than the player entering a run,
 // pipelines not yet warmed are compiled on the spot on the submit thread = in-run stutter; the loading screen on entering a run blocks the player anyway, so let it load a little longer (called where hle_nvn.c presents).
@@ -3811,6 +3871,8 @@ static void warm_start(void) {
         paths = all;
     }
     if (!g_warm_items) g_warm_items = [NSMutableArray array];
+    // Initialize environment-only switches before any concurrent shader loaders.
+    rt_range_on(); query_merge_on(); vfetch_enabled(); raytrace_enabled();
     g_warm_t0 = bp_now();
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);   // Not optional background work: it decides whether the pipelines are ready before the player enters a run
     dispatch_queue_t q = dispatch_queue_create("dm.nvn.pso-warm", attr);
