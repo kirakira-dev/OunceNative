@@ -25,6 +25,8 @@ For build steps, see the [project README](../../README.md) and [development note
 
 For which Metal object each NVN object and command lands on, see [nvn_metal_mapping.md](nvn_metal_mapping.md).
 
+Read-only query passes can share an encoder while their resources remain unchanged. If binding changes the texture registry, resource serials, or guest-memory generation, the draw reopens once with ordinary attachments and pass boundaries. This avoids recursive retries under continuous changes. `t_query_merge` checks the query results, uniform updates, clear/scissor behavior, and visibility-buffer rollover with merging on/off; `on churn-registry`, `on churn-serial`, and `on churn-dirty` additionally force a change on every binding attempt and require exactly one GPU draw after at most two attempts. Build it with `make -C dm/gfx/tests GAME="$DM_GAME" t_query_merge` and run each case with `MTL_DEBUG_LAYER=1`.
+
 ### Shader translation chain
 
 The game's shaders are GPU machine code for the Tegra X1 (the Maxwell instruction set). The translation from this machine code to Metal Shading Language is not done on the phone; all of it happens offline:

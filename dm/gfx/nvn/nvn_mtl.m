@@ -2116,7 +2116,7 @@ static id<MTLCommandBuffer> g_legacy_cb;
 #include "nvn_bc_rt.inc"
 static int g_rt_merged;         // The current pass has already been continued (at least one same-target SetRenderTargets was merged in)
 static int g_query_pass_ro, g_query_merged;
-static uint64_t g_query_merges;
+static uint64_t g_query_merges, g_draw_binding_fallbacks;
 static uint64_t g_rt_merge_n;   // Cumulative continuation count
 static int g_defer_replaying;
 static void fz_end(void);   // Wrap-up of the readable-tile pass merge (defined before draw)
@@ -6123,6 +6123,8 @@ static void nx2_capture_facts(int compute) {
 static void draw_tess(NvProg *pr, const p_draw *dw, const p_draw_idx *di);
 static void draw_geometry(NvProg *pr, const p_draw *dw, const p_draw_idx *di);
 static void draw(const p_draw *dw, const p_draw_idx *di) {
+    int plain_retry = 0;
+retry:;
     nx2_capture_facts(0);
     if (!S.prog) { RED_ONCE(18, "no program bound before the draw"); PD("Z %llu draw skipped: no program bound", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
@@ -6139,7 +6141,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
         PD("N %llu zero-source draw skipped", g_stat_pass + 1); return; }
     if (ixc_wanted(dw, di) && !ixc_find(dw, di)) ixc_run(dw, di);   // indirect quads / fans / 8-bit indices: converted on the GPU before the render pass, at their own place in the replay (see ixc_run)
     if (di && wide_wanted(di) && !wide_find(di)) wide_run(di);   // 8-bit indices written earlier in this submission: widened on the GPU before the render pass (see wide_run)
-    if (!g_defer_replaying) {
+    if (!plain_retry && !g_defer_replaying) {
         if (g_defer.active && g_defer.in_p && !g_defer.at_q) { if (defer_take(dw, di)) return; }
     }
     // Draws that cannot draw anything (both faces culled, empty scissor) return before the render pass is opened: otherwise the render pass is already open and on TBDR the whole attachment is loaded and stored for nothing
@@ -6223,16 +6225,16 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
 #ifdef NVN_RT_RANGE_TEST
     if (!g_enc) rr_begin();
 #endif
-    int defer_q_draw = !g_enc && !g_defer_replaying && g_defer_natq > 0;   // The draw that opens Q's render pass: after the render pass is opened as usual through hoist_try / fuse_try, replay P first and then draw this one
-    if (g_frz_state) goto frz_plain;   // Full frame / frozen frame of world freeze: no hoisting, no deferral, no merging (the pass-skipping state machine must see every set-target)
+    int defer_q_draw = !plain_retry && !g_enc && !g_defer_replaying && g_defer_natq > 0;   // The draw that opens Q's render pass: after the render pass is opened as usual through hoist_try / fuse_try, replay P first and then draw this one
+    if (plain_retry || g_frz_state) goto frz_plain;   // A binding retry and world freeze must preserve ordinary pass boundaries.
     if (!g_enc && tbdr_on()) hoist_try();   // First hoist and execute the pure-clear render passes sandwiched between this render pass and its continuation (before rp_begin_ex, not occupying this render pass)
     // The deferral decision comes after hoist_try: hoisted pure-clear render passes are skipped in the lookahead, and only then can P's same-target continuation segment be recognized
     if (!g_enc && tbdr_on() && !defer_has_in_p() && !g_defer_replaying && !g_fz.active && !g_fz_checking && g_exec_next) { defer_try(dw, di); if (g_defer_cur->active && g_defer_cur->in_p) return; }
     if (!g_enc && tbdr_on() && !g_fz_checking) fuse_try();   // Readable tile render pass merge is on by default; when the structure / same-pixel proof does not hold it still falls back to a normal render pass, and it is not re-entered during the CHECK redraw
 frz_plain:;
-    int need = g_enc || !ds_attach_on() ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
+    int need = g_enc || !ds_attach_on() ? 3 : pass_ds_need(), mode = plain_retry || defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 attach neither, 3 attach stencil only, 4 attach depth only
     int skip_d = mode != 0;
-    if (!g_enc && query_merge_on() && !defer_q_draw && !g_fz.active && query_draw_ro(pr)) {
+    if (!plain_retry && !g_enc && query_merge_on() && !defer_q_draw && !g_fz.active && query_draw_ro(pr)) {
         int clear = R.clear_d || R.clear_s;
         for (int i = 0; i < 8; i++) clear |= R.clear_c[i];
         if (!clear) { mode = 5; skip_d = 0; } // Color is sampled, never attached or written.
@@ -6309,8 +6311,18 @@ frz_plain:;
     g_kd_force = kd_draw(pr, dw, di);
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);
     if (pr->sh[1]) encode_args(en, pr->sh[1], 1, 0);
-    // Parameter binding captures the actual resources under the registry lock; if the version changed between the eligibility check and the binding, split and retry before any GPU draw.
-    if ((g_rt_range_active || g_enc_mode == 5) && (g_pass.reg_gen != g_reg_gen || g_pass.ser_gen != g_ser_gen || g_pass.range_dirty != nvn_dirty_now())) { rp_end(); draw(dw, di); return; }
+#ifdef NVN_DRAW_BINDINGS_READY_TEST
+    NVN_DRAW_BINDINGS_READY_TEST();
+#endif
+    // Resource creation during binding, or concurrent guest writes, can invalidate
+    // every attempt. Reopen once without pass merging instead of recursively
+    // choosing the same optimization until the host stack is exhausted. No GPU
+    // draw or visibility sample has been emitted yet; normal binding runs again.
+    if ((g_rt_range_active || g_enc_mode == 5) && !query_resources_unchanged()) {
+        if (!g_draw_binding_fallbacks++) MLOG("resource change during merged-pass binding: reopening an ordinary pass (mode %d, registry %llu/%llu, serial %llu/%llu, dirty %llu/%llu)",
+            g_enc_mode, g_pass.reg_gen, (uint64_t)g_reg_gen, g_pass.ser_gen, (uint64_t)g_ser_gen, g_pass.range_dirty, nvn_dirty_now());
+        rp_end(); plain_retry = 1; goto retry;
+    }
     if (raytrace_enabled()) ray_capture_draw(pr,dw,di,(id<MTL4RenderCommandEncoder>)en);
     int prim = dw ? dw->prim : di->prim;
     MTLPrimitiveType mp;

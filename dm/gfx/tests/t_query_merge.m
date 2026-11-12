@@ -1,4 +1,26 @@
+static void query_test_bindings_ready(void);
+#define NVN_DRAW_BINDINGS_READY_TEST query_test_bindings_ready
 #include "../nvn/nvn_mtl.m"
+static int binding_churn;
+static void *churn_memory;
+static unsigned max_binding_attempts;
+static void query_test_bindings_ready(void) {
+    if (!binding_churn) return;
+    static uint64_t last_draw = ~0ull;
+    static unsigned attempts;
+    if (last_draw != g_stat_draw) { last_draw = g_stat_draw; attempts = 0; }
+    attempts++;
+    if (attempts > max_binding_attempts) max_binding_attempts = attempts;
+    // Bound the negative control before the old implementation overflows its stack.
+    if (attempts > 8) { fprintf(stderr, "FAIL repeated binding retry without a GPU draw\n"); exit(2); }
+    if (binding_churn == 1) g_reg_gen++;
+    if (binding_churn == 2) g_ser_gen++;
+    if (binding_churn == 3) {
+        nvn_dirty_protect(churn_memory, 1);
+        dm_guest_write_prepare(churn_memory, 1);
+        (*(uint8_t *)churn_memory)++;
+    }
+}
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { memset(key, 0, 8); return 0; }
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { return NULL; }
@@ -23,9 +45,16 @@ static void update(commands *c, uint64_t address, float value) {
 }
 int main(int argc, char **argv) { @autoreleasepool {
     int merge = argc == 1 || strcmp(argv[1], "off");
-    int footprint = argc < 3;
+    int footprint = argc < 3 || !strncmp(argv[2], "churn-", 6);
+    if (argc > 2 && !strcmp(argv[2], "churn-registry")) binding_churn = 1;
+    if (argc > 2 && !strcmp(argv[2], "churn-serial")) binding_churn = 2;
+    if (argc > 2 && !strcmp(argv[2], "churn-dirty")) binding_churn = 3;
     setenv("DM_NVN_QUERY_MERGE", merge ? "1" : "0", 1); setenv("DM_NVN_TBDR", "0", 1);
     mtl_init(); state_reset(); S.ds.dw = 0; NSError *error = nil;
+    if (binding_churn == 3) {
+        CHECK(!posix_memalign(&churn_memory, 16384, 16384)); memset(churn_memory, 0, 16384);
+        nvn_dirty_add_range(churn_memory, 16384);
+    }
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct A { texture2d<float, access::read> tex [[id(0)]]; constant float *cb [[id(1)]]; };\n"
         "vertex float4 vs(uint i [[vertex_id]]) { return float4(i==1?3.0:-1.0,i==2?3.0:-1.0,0,1); }\n"
@@ -109,8 +138,13 @@ int main(int argc, char **argv) { @autoreleasepool {
         }
     }
     fprintf(stderr, "%llu passes, %llu merges\n", g_stat_pass, g_query_merges);
-    CHECK(merge && footprint ? g_query_merges > 3 * (QUERIES - 100) && g_stat_pass < 140 : g_stat_pass >= 3 * QUERIES);
+    CHECK(merge && footprint && !binding_churn ? g_query_merges > 3 * (QUERIES - 100) && g_stat_pass < 140 : g_stat_pass >= 3 * QUERIES);
     CHECK(merge || !g_query_merges);
+    CHECK(g_stat_draw == 3 * (QUERIES + 1));
+    if (binding_churn && merge) {
+        CHECK(g_draw_binding_fallbacks >= 3 * (QUERIES - 2));
+        CHECK(max_binding_attempts == 2);
+    }
     CHECK(((float *)uniforms)[1] == ((QUERIES - 1) & 1 ? 2 : 6));
     CHECK(((float *)uniforms)[7] == ((QUERIES - 1) % 3 != 0));
     // Compare final storage after overlapping, adjacent and disjoint updates.
@@ -144,5 +178,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(!memcmp((uint8_t *)adjacent + 16380, pair, sizeof pair));
     mtl_pool_del(adjacent); mtl_pool_del((uint8_t *)adjacent + 16384); free(adjacent);
     printf("PASS 3 rounds of %u attachment-sampling queries, sparse uniform snapshots, writable draw, clear, scissor and rollover (%s: %llu passes, %llu merges)\n", QUERIES, merge ? "on" : "off", g_stat_pass, g_query_merges);
+    if (binding_churn) printf("PASS binding churn %d: %llu fallbacks, at most %u binding attempts per GPU draw\n", binding_churn, g_draw_binding_fallbacks, max_binding_attempts);
+    if (churn_memory) { nvn_dirty_remove_range(churn_memory); free(churn_memory); }
     vis_clear(); free(c.bytes); free(result); mtl_pool_del(uniforms); free(uniforms); return 0;
 }}
