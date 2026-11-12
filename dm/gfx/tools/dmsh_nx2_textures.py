@@ -116,7 +116,9 @@ def runtime_texture_formats(source, reflection, stage):
         raise ValueError(f'deferred texture arguments exceed runtime limit: {aid}')
     bindings.extend(extra)
     if declarations:
-        last = list(re.finditer(r'^\s+.+\s+\w+\s+\[\[id\(\d+\)\]\];', source, re.M))[-1]
+        # Only the attribute terminator is needed. Matching whole declaration
+        # lines also backtracks through long generated arithmetic expressions.
+        last = list(re.finditer(r'\[\[id\(\d+\)\]\];', source))[-1]
         source = source[:last.end()] + '\n' + '\n'.join(declarations) + source[last.end():]
     reflection['runtime_texture_formats'] = dict(version=1)
     marker = 'using namespace metal;'
