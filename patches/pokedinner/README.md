@@ -79,7 +79,7 @@ make -C dm/gfx/tests GAME=0400380020056000 t_runtime_textures
 python3 dm/gfx/tests/test_runtime_textures.py
 ```
 
-It checks 84 descriptor rebindings across 2D, 2D array, cube array, and 3D textures in seven numeric formats; 16,128 exact texture-operation values and 10,752 output guard words. It exercises rectangle texture/view coordinates, argument reuse, layer/face/depth selection, signed extension, and invalid reflection metadata. The compiler patch also reproduces all three modified source files from the preceding patch set. In the owned Raiders archive, this path adds 9,138 programs through SPIR-V validation and Metal compilation, including 98 of the 103 recovered programs missing from older gameplay logs; those other five still reject missing descriptor facts.
+It checks 84 descriptor rebindings across 2D, 2D array, cube array, and 3D textures in seven numeric formats; 16,128 exact texture-operation values and 10,752 output guard words. It exercises rectangle texture/view coordinates, argument reuse, layer/face/depth selection, signed extension, and invalid reflection metadata. The compiler patch also reproduces all three modified source files from the preceding patch set. In the owned Raiders archive, this path adds 9,138 programs through SPIR-V validation and Metal compilation, including 98 of the 103 recovered programs missing from older gameplay logs; the other five are subsequently covered through captured bindings or runtime dimension queries.
 
 ## Runtime texture dimension queries
 
