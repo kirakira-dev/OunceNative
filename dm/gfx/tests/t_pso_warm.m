@@ -10,7 +10,43 @@ uint64_t now_ns(void) { return bp_now(); }
 uint64_t nvn_new_serial(void) { static uint64_t serial = 90000; return ++serial; }
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
+// Validate a game's recorded manifest with the real package and Metal compiler.
+// This does not render a scene; the fixture below separately checks GPU results.
+static int check_manifest(const char *package, const char *path, const char *workers) {
+    NSString *source = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
+    CHECK(source); CHECK(atoi(workers) >= 1 && atoi(workers) <= 8);
+    NSMutableSet<NSString *> *seen = [NSMutableSet set], *shaders = [NSMutableSet set];
+    unsigned ns = 0, nr = 0, nc = 0;
+    for (NSString *line in [source componentsSeparatedByString:@"\n"]) {
+        if (!line.length || [line hasPrefix:@"#"] || [seen containsObject:line]) continue;
+        [seen addObject:line];
+        NSArray<NSString *> *c = [line componentsSeparatedByString:@"\t"];
+        if ([c[0] isEqualToString:@"S"]) {
+            CHECK(c.count == 3 && c[1].length && c[2].length == 1 && [@"012345" containsString:c[2]]);
+            [shaders addObject:c[1]]; ns++;
+        } else if ([c[0] isEqualToString:@"C"]) {
+            CHECK(c.count == 2 && c[1].length); [shaders addObject:c[1]]; nc++;
+        } else {
+            CHECK([c[0] isEqualToString:@"R"] && c.count == 2);
+            pso_skey sk; CHECK(!pso_skey_parse(c[1].UTF8String, &sk));
+            NSString *v = warm_key(sk.vs, sizeof sk.vs), *f = warm_key(sk.fs, sizeof sk.fs);
+            CHECK(v.length && f); [shaders addObject:v]; if (f.length) [shaders addObject:f]; nr++;
+        }
+    }
+    CHECK(seen.count);
+    setenv("DM_PSO_WORKERS", workers, 1); setenv("DM_PSO_STARTUP_WAIT_MS", "120000", 1);
+    setenv("DM_PSO_MANIFEST", path, 1);
+    mtl_init(); g_msl_dir = @(package); warm_start(); warm_startup_wait();
+    CHECK(!atomic_load(&g_warm_running)); CHECK(g_warm_done == seen.count && g_warm_total == seen.count);
+    CHECK(g_warm_shaders == ns && g_warm_rps == nr && g_warm_cps == nc && !g_warm_skip_fz);
+    for (NSString *key in shaders) CHECK(g_shcache[key]);
+    printf("PSO_MANIFEST PASS %u shader rows / %u render pipelines / %u compute pipelines; %lu shader dependencies retained, %u render / %u compute cache entries\n",
+        ns, nr, nc, (unsigned long)shaders.count, g_pso.n, g_cps.n);
+    return 0;
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
+    if (argc == 5 && !strcmp(argv[1], "--manifest")) return check_manifest(argv[2], argv[3], argv[4]);
     CHECK(argc == 3); mtl_init();
     g_msl_dir = @(argv[1]);
     setenv("DM_PSO_WORKERS", argv[2], 1);

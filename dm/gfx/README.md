@@ -137,6 +137,16 @@ The tests in `dm/gfx/tests` compile the production code in directly and need a M
 | `t_fuse_check`, `t_reorder_chain`, `t_defer_chain`, `t_zskip`, `t_xv`, `t_ub`, `t_pfv`, `t_rt_range`, `t_rt_range_shape`, `t_rt_range_ro`, `t_rt_depth_ro` | Compile the replay layer `nvn_mtl.m` in directly and check the various optimization and diagnostic logic inside the replay layer |
 | `test_tbdr_budget.py` | The parsing in `tools/tbdr_budget.py` |
 
+`python3 dm/gfx/tests/test_pso_warm.py` checks concurrent warm-up and rendered/compute results with 1, 4, and 8 workers. To validate every entry in a recorded game manifest against the current shader package, build `t_pso_warm` for that game and run:
+
+```sh
+make -C dm/gfx/tests GAME="$DM_GAME" t_pso_warm
+WARM_CHAIN=$(python3 dm/gfx/tools/dmsh_chain.py)
+MTL_DEBUG_LAYER=1 dm/gfx/tests/t_pso_warm --manifest "$DM_MSL_DIR/b-$WARM_CHAIN" "dm/games/$DM_GAME/pso_manifest.tsv" 4
+```
+
+This mode rejects malformed rows and fails if any shader or pipeline cannot be prepared, or any shader dependency is absent after cache transfer. It does not render the recorded scenes.
+
 ## Common run-time switches
 
 All are environment variables. The iOS App sets `DM_NVN_SHMAP` and `DM_MSL_DIR` itself at startup.

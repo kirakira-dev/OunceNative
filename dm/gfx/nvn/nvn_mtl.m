@@ -3090,7 +3090,7 @@ static inline __attribute__((always_inline)) void *tex_fast(int tid) {
 // The texture type the shader declares differs from the one the descriptor gives: use a compatible view. Maxwell sample instructions carry their own dimension, and a non-array instruction reading a 2D array texture reads layer 0;
 // on Metal a 2D array bound to a texture2d argument is a type mismatch with undefined reads (measured: one fixed value). Super Mario 3D World + Bowser's Fury creates its pre-lighting buffer as a one-layer 2D array
 // and the deferred lighting shader samples it as 2D: the ambient light of the whole picture became one colour, washed out white. Supports 2D array <-> 2D and 2D array -> cube / cube array; any other mismatch is reported once. Caller holds g_rmu
-static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, uint64_t *rid) {
+static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, uint64_t *rid, const char *key, int reg) {
     MTLTextureType have = t.textureType; NSUInteger ns = 0;
     if (want == MTLTextureType2D && have == MTLTextureType2DArray) ns = 1;
     else if (want == MTLTextureType2DArray && have == MTLTextureType2D) ns = 1;
@@ -3098,12 +3098,12 @@ static id<MTLTexture> tex_fit(int tid, id<MTLTexture> t, MTLTextureType want, ui
     else if (want == MTLTextureTypeCubeArray && have == MTLTextureType2DArray && t.arrayLength >= 6) ns = t.arrayLength / 6 * 6;
     else if (want == MTLTextureTypeCube && have == MTLTextureTypeCubeArray) ns = 6;   // a cube array read as a cube: the first cube
     else if (want == MTLTextureTypeCubeArray && have == MTLTextureTypeCube) ns = 6;
-    if (!ns || tid <= 0 || tid >= g_ntreg) { RED_ONCE(76, "texture type mismatch: shader declares %lu, texture is %lu (texture ID %d); no compatible view, binding an empty texture", (unsigned long)want, (unsigned long)have, tid); return nil; }
+    if (!ns || tid <= 0 || tid >= g_ntreg) { RED_ONCE(76, "texture type mismatch: shader %s slot %d declares %lu, texture is %lu (texture ID %d, frame %llu, pass %llu); no compatible view, binding an empty texture", key, reg, (unsigned long)want, (unsigned long)have, tid, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass); return nil; }
     treg_t *r = &g_treg[tid];
     if (r->alt && r->alt_of == (__bridge void *)t && r->alt_type == (uint8_t)want) { *rid = r->alt_rid; return (__bridge id<MTLTexture>)r->alt; }
     if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
     id<MTLTexture> v = [t newTextureViewWithPixelFormat:t.pixelFormat textureType:want levels:NSMakeRange(0, t.mipmapLevelCount) slices:NSMakeRange(0, ns) swizzle:t.swizzle];
-    if (!v) { RED_ONCE(77, "cannot create a type-compatible texture view: %lu → %lu (texture ID %d)", (unsigned long)have, (unsigned long)want, tid); return nil; }
+    if (!v) { RED_ONCE(77, "cannot create a type-compatible texture view: %lu → %lu (texture ID %d, shader %s slot %d, frame %llu, pass %llu)", (unsigned long)have, (unsigned long)want, tid, key, reg, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass); return nil; }
     r->alt = (void *)CFBridgingRetain(v); r->alt_of = (__bridge void *)t; r->alt_type = (uint8_t)want; r->alt_rid = v.gpuResourceID._impl;
     *rid = r->alt_rid; return v;
 }
@@ -4098,7 +4098,7 @@ static int encode_args_to(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage,
             // An incompatible descriptor has no view of the requested dimension.
             // Bind the correctly typed null resource, as the reference backend
             // does, rather than asking Metal to interpret another texture type.
-            if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; t = tex_fit(tid, t, (MTLTextureType)b->dtt, &r2); trid = r2; }
+            if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; t = tex_fit(tid, t, (MTLTextureType)b->dtt, &r2, sh->key, reg); trid = r2; }
             if (t && nvn_stage == 1 && afr_want(sh)) { uint64_t r2 = 0; id<MTLTexture> v = tex_alpha_red(tid, t, &r2); if (v) { t = v; trid = r2; } }   // see tex_alpha_red
             if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt & 7][b->dpf & 3]; }
             slots[aid] = trid;
