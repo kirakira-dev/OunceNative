@@ -54,6 +54,21 @@ def select_ready(jobs, report):
     return [job for job in jobs if results[job['key']]['status'] == 'ok']
 
 
+def select_jobs(root, programs, exclude):
+    jobs, unsupported, excluded = [], [], 0
+    for key, record in sorted(programs.items()):
+        if key in exclude:
+            excluded += 1
+            continue
+        job = make_job(root, key, record)
+        if job is None:
+            unsupported.append(dict(key=key, stage=record['first']['stage'],
+                                    source=record['first'].get('source')))
+        else:
+            jobs.append(job)
+    return jobs, unsupported, excluded
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('extracted', type=Path, help='nx2_bnsh_extract.py output directory')
@@ -73,14 +88,14 @@ def main():
             fields = line.split('\t')
             if len(fields) >= 4 and len(fields[3]) == 16:
                 exclude.add(fields[3])
-    jobs = [job for key, record in sorted(index['programs'].items())
-            if key not in exclude and (job := make_job(root, key, record)) is not None]
+    jobs, unsupported, excluded = select_jobs(root, index['programs'], exclude)
     if args.runtime_texture_formats:
         for job in jobs:
             job['defer_sampled_texture_formats'] = True
     args.output.mkdir(parents=True, exist_ok=False)
     source = args.output / 'all-jobs.json'
     source.write_text(json.dumps(jobs, indent=2))
+    (args.output / 'unsupported-stages.json').write_text(json.dumps(unsupported, indent=2))
     with (args.output / 'compiler.log').open('w') as log:
         result = subprocess.run([str(args.compiler.resolve()), str(source), str(args.output / 'spirv')],
                                 stdout=log, stderr=subprocess.STDOUT)
@@ -90,7 +105,9 @@ def main():
               (args.output / 'spirv/compile-report.jsonl').read_text().splitlines()]
     ready = select_ready(jobs, report)
     (args.output / 'ready-jobs.json').write_text(json.dumps(ready, indent=2))
-    summary = dict(requested=len(jobs), ready=len(ready),
+    summary = dict(archive_programs=len(index['programs']), excluded=excluded,
+                   unsupported_stages=Counter(row['stage'] for row in unsupported),
+                   requested=len(jobs), ready=len(ready),
                    rejected=Counter(row['error'] for row in report if row['status'] == 'error'),
                    compiler_sha256=hashlib.sha256(args.compiler.read_bytes()).hexdigest(),
                    index_sha256=hashlib.sha256((root / 'index.json').read_bytes()).hexdigest())

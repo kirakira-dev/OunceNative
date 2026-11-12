@@ -4,11 +4,12 @@ import hashlib
 from pathlib import Path
 import struct
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from nx2_bnsh_extract import bnsh_programs, containers
-from nx2_bnsh_jobs import select_ready
+from nx2_bnsh_jobs import select_jobs, select_ready
 
 
 def fixture(stage=0):
@@ -102,6 +103,24 @@ class Extraction(unittest.TestCase):
                         [report[0], {'key': 'b', 'status': 'unknown'}]):
             with self.assertRaises(ValueError):
                 select_ready(jobs, invalid)
+
+    def test_archive_stage_accounting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'capture').mkdir()
+            programs, keys = {}, {}
+            for stage in range(6):
+                key, control, code, c1, info = next(bnsh_programs(fixture(stage)))
+                keys[stage] = key
+                for suffix, data in (('ctl', control), ('code', code), ('c1', c1)):
+                    (root / 'capture' / (key + '.' + suffix)).write_bytes(data)
+                programs[key] = dict(first=info, sha256=hashlib.sha256(control + code + c1).hexdigest())
+            jobs, unsupported, excluded = select_jobs(root, programs, {keys[0], 'not-in-archive'})
+            self.assertEqual({job['key'] for job in jobs}, {keys[1], keys[5]})
+            self.assertEqual({row['key']: row['stage'] for row in unsupported},
+                             {keys[stage]: stage for stage in (2, 3, 4)})
+            self.assertEqual(excluded, 1)
+            self.assertEqual(len(jobs) + len(unsupported) + excluded, len(programs))
 
 
 if __name__ == '__main__':
