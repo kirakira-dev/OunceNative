@@ -11,6 +11,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "dm_motion.h"
+#include "dm_motion_gamecontroller.h"
 #include "dm_uiscreen.h"
 #include "dm_raiders_mods.h"
 #include "settings_mac.h"
@@ -194,7 +195,9 @@ static void read_pad(GCExtendedGamepad *g) {   // same mapping as dm/ios/Sources
 }
 static void pads_changed(void) {
     int any = 0;
-    for (GCController *c in GCController.controllers) if (c.extendedGamepad) {
+    NSArray<GCController *> *controllers = GCController.controllers;
+    dm_motion_gamecontroller_update(controllers);
+    for (GCController *c in controllers) if (c.extendedGamepad) {
         any = 1; LOG("controller: %s", c.vendorName.UTF8String ?: "?");
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
         read_pad(c.extendedGamepad);

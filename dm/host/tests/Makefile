@@ -114,3 +114,12 @@ $(B)/t_target_rank: t_target_rank.c ../hle_target.c ../dm.h | $(B)
 
 $(B)/t_motion: t_motion.c ../dm_motion.c ../dm_motion.h | $(B)
 	clang -O1 -Wall -Wextra -o $@ t_motion.c ../dm_motion.c -lm
+$(B)/t_motion_sensor: t_motion_sensor.c ../dm_motion.c ../dm_motion.h | $(B)
+	clang -O1 -Wall -Wextra -o $@ t_motion_sensor.c ../dm_motion.c -lm
+$(B)/t_motion_gamecontroller: t_motion_gamecontroller.m ../dm_motion_gamecontroller.m ../dm_motion_gamecontroller.h ../dm_motion.h | $(B)
+	clang -O1 -Wall -Wextra -fobjc-arc -o $@ t_motion_gamecontroller.m ../dm_motion_gamecontroller.m -framework Foundation -framework GameController
+.PHONY: motion
+motion: $(B)/t_motion $(B)/t_motion_sensor $(B)/t_motion_gamecontroller
+	$(B)/t_motion
+	$(B)/t_motion_sensor
+	$(B)/t_motion_gamecontroller
