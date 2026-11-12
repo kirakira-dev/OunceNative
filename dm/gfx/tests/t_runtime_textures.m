@@ -9,7 +9,7 @@ uint64_t nvn_new_serial(void) { static uint64_t serial = 98000; return ++serial;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s (%s)\n", __LINE__, #x, error.description.UTF8String); return 1; } } while (0)
 
 int main(int argc, char **argv) { @autoreleasepool {
-    NSError *error = nil; CHECK(argc == 3); unsigned dimension = atoi(argv[2]); CHECK(dimension <= 2); mtl_init(); state_reset();
+    NSError *error = nil; CHECK(argc == 3); unsigned dimension = atoi(argv[2]); CHECK(dimension <= 3); mtl_init(); state_reset();
     NSString *directory = @(argv[1]);
     NSString *source = [NSString stringWithContentsOfFile:[directory stringByAppendingPathComponent:@"fixture.metal"] encoding:NSUTF8StringEncoding error:&error]; CHECK(source);
     MTLCompileOptions *options = [MTLCompileOptions new]; options.mathMode = MTLMathModeSafe;
@@ -64,9 +64,9 @@ int main(int argc, char **argv) { @autoreleasepool {
         unsigned shader_index = rect != 0;
         unsigned kind = test == 1 || test == 5 ? 1 : test == 2 || test == 6 ? 2 : 0;
         tex_t t = {.magic = MAGIC('T','E','X',0), .serial = nvn_new_serial()};
-        unsigned slices = dimension == 1 ? 3 : dimension == 2 ? 12 : 1, height = dimension == 2 ? 8 : 4;
+        unsigned slices = dimension == 1 || dimension == 3 ? 3 : dimension == 2 ? 12 : 1, height = dimension == 2 ? 8 : 4;
         t.d.width = 8; t.d.height = height; t.d.depth = slices; t.d.levels = t.d.samples = 1;
-        t.d.target = dimension == 1 ? NVN_TEXTURE_TARGET_2D_ARRAY : dimension == 2 ? NVN_TEXTURE_TARGET_CUBEMAP_ARRAY : rect == 1 ? NVN_TEXTURE_TARGET_RECTANGLE : NVN_TEXTURE_TARGET_2D; t.d.format = formats[test];
+        t.d.target = dimension == 1 ? NVN_TEXTURE_TARGET_2D_ARRAY : dimension == 2 ? NVN_TEXTURE_TARGET_CUBEMAP_ARRAY : dimension == 3 ? NVN_TEXTURE_TARGET_3D : rect == 1 ? NVN_TEXTURE_TARGET_RECTANGLE : NVN_TEXTURE_TARGET_2D; t.d.format = formats[test];
         id<MTLTexture> texture = tex_mtl(&t); CHECK(texture);
         uint32_t raw[] = {0, 1, 0x7fc12345, 0xffffffff, 0x80000000, 0x7fffffff, 16777217, 0x81234567,
                           4, 99, 0x12345678, 0xffff0001, 0x3f800000, 0x80000001, 0x7f800000, 0xdeadbeef};
@@ -80,7 +80,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         }
         mtl_sub_begin(); res_add(seed);
         for (unsigned sl = 0; sl < slices; sl++)
-            enc_b_copy_buffer_texture(blit(), seed, sl * height * 256, 256, height * 256, MTLSizeMake(8, height, 1), texture, sl, 0, MTLOriginMake(0, 0, 0));
+            enc_b_copy_buffer_texture(blit(), seed, sl * height * 256, 256, height * 256, MTLSizeMake(8, height, 1), texture, dimension == 3 ? 0 : sl, 0, MTLOriginMake(0, 0, dimension == 3 ? sl : 0));
         view_t view = {.set_target = 1, .target = NVN_TEXTURE_TARGET_RECTANGLE};
         mtl_reg_tex(300, &t, rect == 2 ? &view : NULL);
         if (native) {
@@ -120,7 +120,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         // The integer read row must also match the input bits without relying on
         // the reference shader, including values beyond float's exact range.
         if (kind) for (unsigned x = 0; x < 8; x++) for (unsigned c = 0; c < 4; c++) {
-            unsigned slice = dimension == 1 ? x % 3 : dimension == 2 ? (x % 2) * 6 : 0;
+            unsigned slice = dimension == 1 || dimension == 3 ? x % 3 : dimension == 2 ? (x % 2) * 6 : 0;
             unsigned n = (x * 4 + c + slice * 3) % 16;
             uint32_t want = test < 3 ? raw[n] : kind == 1 ? bytes[n] : (uint32_t)(int32_t)(int8_t)bytes[n];
             CHECK(actual[(3 * 10 + x + 1) * 4 + c] == want);

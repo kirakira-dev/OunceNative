@@ -31,9 +31,18 @@ struct Set {
     sampler fs_tex2_20Smplr [[id(1)]];
 };
 '''
-for dimension, texture_type in enumerate(('texture2d', 'texture2d_array', 'texturecube_array')):
+for dimension, texture_type in enumerate(('texture2d', 'texture2d_array', 'texturecube_array', 'texture3d')):
     operations = body
-    if dimension:
+    if dimension == 3:
+        coord = 'float3(uv, (float(x % 3) + .5f) / 3.f)'
+        operations = operations.replace('SAMP, RECT ? uv * float2(8, 4) : uv', f'SAMP, {coord}')
+        operations = operations.replace('TEX.gather(SAMP, uv, int2(0), component::x)', f'TEX.sample(SAMP, {coord}, level(0))')
+        operations = operations.replace('SAMP, uv,', f'SAMP, {coord},')
+        operations = operations.replace('TEX.read(uint2(x, 1))', 'TEX.read(uint3(x, 1, x % 3))')
+        operations = operations.replace('0x12345678u', 'TEX.get_depth()')
+        operations = operations.replace('gradient2d(float2(.125f, 0), float2(0, .25f))',
+                                        'gradient3d(float3(.125f, 0, 0), float3(0, .25f, 0))')
+    elif dimension:
         coord = 'uv' if dimension == 1 else 'float3(1.f, .25f, 2.f * uv.x - 1.f)'
         layer = 'x % 3' if dimension == 1 else 'x % 2'
         operations = operations.replace('SAMP, RECT ? uv * float2(8, 4) : uv', f'SAMP, {coord}, {layer}')
