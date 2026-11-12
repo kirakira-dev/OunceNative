@@ -2454,8 +2454,8 @@ static int raytrace_enabled(void) {
 @interface NvShader : NSObject { @public id<MTLFunction> fn; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr; int ray_capture, ray_camera, ray_solid; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     id<MTLLibrary> vfetch_lib; NSString *vfetch_entry; uint32_t vfetch_mask;
     NSMutableDictionary<NSNumber *, id> *vfetch_functions;
-    id<MTLLibrary> color_lib; NSString *color_entry; uint8_t color_mask; uint32_t varying_inputs, varying_outputs;
-    NSMutableDictionary<NSNumber *, id> *color_functions;
+    id<MTLLibrary> color_lib; NSString *color_entry; uint8_t color_mask, alpha_test; uint32_t varying_inputs, varying_outputs;
+    NSMutableDictionary<NSString *, id> *color_functions;
     // The argument buffer encoded last time
     id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass;   // ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten)
     id<MTLLibrary> bflib; int bflib_tried; NSMutableDictionary<NSString *, id<MTLFunction>> *bffn; } @end   // bflib: readable-tile version <key>_bf (merge B step 2)
@@ -2483,11 +2483,13 @@ static id<MTLFunction> vfetch_specialize(NvShader *vs, uint64_t types) {
         return fn;
     }
 }
-static id<MTLFunction> color_specialize(NvShader *sh, uint32_t types, uint32_t inputs) {
+static id<MTLFunction> color_specialize(NvShader *sh, uint32_t types, uint32_t inputs, uint32_t alpha_func, uint32_t alpha_ref) {
     @synchronized(sh) {
         if (!sh->color_functions) sh->color_functions = [NSMutableDictionary dictionary];
-        uint64_t key = (uint64_t)inputs << 16 | types;
-        id cached = sh->color_functions[@(key)];
+        if (!sh->alpha_test || !alpha_func) alpha_func = NVN_ALPHA_FUNC_ALWAYS;
+        if (alpha_func == NVN_ALPHA_FUNC_ALWAYS || alpha_func == NVN_ALPHA_FUNC_NEVER) alpha_ref = 0;
+        NSString *key = [NSString stringWithFormat:@"%x:%x:%x:%x", types, inputs, alpha_func, alpha_ref];
+        id cached = sh->color_functions[key];
         if (cached) return cached == NSNull.null ? nil : cached;
         MTLFunctionConstantValues *values = [MTLFunctionConstantValues new];
         for (unsigned slot = 0; slot < 8; slot++) if (sh->color_mask >> slot & 1) {
@@ -2498,10 +2500,15 @@ static id<MTLFunction> color_specialize(NvShader *sh, uint32_t types, uint32_t i
             bool present = (inputs >> loc) & 1;
             [values setConstantValue:&present type:MTLDataTypeBool atIndex:160 + loc];
         }
+        if (sh->alpha_test) {
+            float reference; memcpy(&reference, &alpha_ref, sizeof reference);
+            [values setConstantValue:&alpha_func type:MTLDataTypeUInt atIndex:192];
+            [values setConstantValue:&reference type:MTLDataTypeFloat atIndex:193];
+        }
         NSError *error = nil;
         id<MTLFunction> fn = [sh->color_lib newFunctionWithName:sh->color_entry constantValues:values error:&error];
         if (!fn) MLOG("[RED] color output specialization failed for %s: %s", sh->key, error.localizedDescription.UTF8String);
-        sh->color_functions[@(key)] = fn ?: (id)NSNull.null;
+        sh->color_functions[key] = fn ?: (id)NSNull.null;
         return fn;
     }
 }
@@ -2689,7 +2696,7 @@ static NvShader *shader_load(NSString *pc, int stage) {
         o->vfetch_mask = [fetch[@"mask"] unsignedIntValue];
         if (o->vfetch_mask != expected) { MLOG("[RED] vertex fetch mask disagrees with reflection for %s", o->key); return nil; }
         o->vfetch_lib = lib; o->vfetch_entry = entry; o->fn = vfetch_specialize(o, types);
-    } else if (stage == 1 && (j[@"color_output_types"] || j[@"fragment_inputs"])) {
+    } else if (stage == 1 && (j[@"color_output_types"] || j[@"fragment_inputs"] || j[@"alpha_test"])) {
         NSDictionary *color = j[@"color_output_types"]; unsigned mask = [color[@"mask"] unsignedIntValue];
         if (color && ([color[@"version"] intValue] != 1 || [color[@"constant_base"] intValue] != 128 || !mask || mask > 255)) {
             MLOG("[RED] invalid color output metadata for %s", o->key); return nil;
@@ -2698,9 +2705,14 @@ static NvShader *shader_load(NSString *pc, int stage) {
         if (inputs && ([inputs[@"version"] intValue] != 1 || [inputs[@"constant_base"] intValue] != 160)) {
             MLOG("[RED] invalid fragment input metadata for %s", o->key); return nil;
         }
+        NSDictionary *alpha = j[@"alpha_test"];
+        if (alpha && ([alpha[@"version"] intValue] != 1 || [alpha[@"function_constant"] intValue] != 192 || [alpha[@"reference_constant"] intValue] != 193)) {
+            MLOG("[RED] invalid alpha test metadata for %s", o->key); return nil;
+        }
+        o->alpha_test = alpha != nil;
         o->varying_inputs = [inputs[@"mask"] unsignedIntValue];
         o->color_lib = lib; o->color_entry = entry; o->color_mask = mask;
-        o->fn = color_specialize(o, 0, o->varying_inputs);
+        o->fn = color_specialize(o, 0, o->varying_inputs, NVN_ALPHA_FUNC_ALWAYS, 0);
     } else o->fn = [lib newFunctionWithName:entry];
     if (!o->fn) return nil;
     if (o->rf.geometry.valid && (stage != 2 || o->fn.functionType != MTLFunctionTypeMesh)) {
@@ -3188,7 +3200,7 @@ static struct {
     uint64_t tex[6][128], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp;
-    float blend_color[4]; int64_t copy_stride, copy_img_stride;
+    float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;
     int patch_size;   // zero until SetPatchSize supplies the input control-point count
     p_primitive_restart primitive_restart;
 } S;
@@ -3562,7 +3574,7 @@ static id<MTLFunction> color_for_pso(NvShader *sh, NvShader *vs, const pso_key *
     uint32_t types = 0;
     for (unsigned slot = 0; slot < 8; slot++) if (sh->color_mask >> slot & 1)
         types |= pf_int_kind(k->cfmt[slot]) << (2 * slot);
-    return color_specialize(sh, types, sh->varying_inputs & vs->varying_outputs);
+    return color_specialize(sh, types, sh->varying_inputs & vs->varying_outputs, k->alpha_func, k->alpha_ref);
 }
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
@@ -3640,6 +3652,10 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
     k->vs = (__bridge void *)vs; k->fs = (__bridge void *)fs;
     memcpy(k->cfmt, cfmt, sizeof k->cfmt); k->dfmt = dfmt; k->sfmt = sfmt; k->samples = samples;
     k->blend_en = S.color.blend_en; k->chmask = S.chmask.mask; k->a2c = S.ms.a2c;
+    if (fs && fs->alpha_test && S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS) {
+        k->alpha_func = S.color.alpha_func;
+        if (k->alpha_func != NVN_ALPHA_FUNC_NEVER) memcpy(&k->alpha_ref, &S.alpha_ref, sizeof k->alpha_ref);
+    }
     for (int i = 0; i < 8; i++) if (k->cfmt[i] || lmap) k->blend[i] = S.blend[i];
     const nvn_refl *rf = &vs->rf;
     for (int v = 0; v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 16 && a < S.nattr) { k->attr[a] = S.attr[a]; int st = S.attr[a].stream; if (st < 16) k->stream[st] = S.stream[st]; } }
@@ -4338,7 +4354,7 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     if (!vs || !fs || vs->rf.pos_attr < 0 || fs->rf.may_discard || fs->rf.writes_smask || !(fs->rf.color_mask >> i & 1)) return g_fd_why = 2, 0;
     if (!t || t.sampleCount != 1 || t.textureType == MTLTextureType3D) return g_fd_why = 3, 0;
-    if ((S.color.blend_en >> i & 1) || ((S.chmask.mask >> (4 * i)) & 0xf) != 0xf || S.ms.a2c || S.poly.mode != NVN_POLYGON_MODE_FILL) return g_fd_why = 4, 0;
+    if ((S.color.blend_en >> i & 1) || ((S.chmask.mask >> (4 * i)) & 0xf) != 0xf || S.ms.a2c || S.poly.mode != NVN_POLYGON_MODE_FILL || S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS) return g_fd_why = 4, 0;
     if (R.rt.depth && ((S.ds.dt && S.ds.df != NVN_DEPTH_FUNC_ALWAYS) || S.ds.st)) return g_fd_why = 5, 0;
     if (n < 3 || n > 64) return g_fd_why = 6, 0;
     float P[64][4]; int why = attr_read(vs->rf.pos_attr, dw, di, P);
@@ -4401,6 +4417,11 @@ static int state_op(uint32_t op, const void *a) {
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
+        case OP_ALPHA_REF: {
+            float value = ((const p_alpha_ref *)a)->value;
+            if (memcmp(&S.alpha_ref, &value, sizeof value)) { S.alpha_ref = value; g_pso_dirty = 1; }
+            break;
+        }
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
         default: return 0;
     }
@@ -5359,6 +5380,9 @@ static int uv_proof(NvShader *vs, int locn, const p_draw *dw, const p_draw_idx *
 static int fz_p2_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di, uint8_t lmap[8], __strong id<MTLFunction> *fn) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1]; *fn = nil;
     if (!vs || !fs) { PD("F %llu not provable: no vertex / fragment shader", g_stat_pass); return 0; }
+    // Retained readable-tile variants do not carry the dynamic alpha-test
+    // specialization. Reopen the original pass and use its normal shader.
+    if (S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS) return 0;
     if (!g_fz.rt2.depth && R.rt.depth && (S.ds.dt || S.ds.dw || S.ds.st)) { PD("F %llu not provable: depth comes from the previous pass and this draw has depth / stencil testing on", g_stat_pass); return 0; }
     int fx[32]; for (int i = 0; i < 32; i++) fx[i] = -1; uint8_t fbmask = 0;
     for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh || sh->stage >= 6) continue;
@@ -7768,7 +7792,7 @@ void mtl_exec(const uint8_t *p) {
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
             case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_PUSH_CONSTANTS:
-            case OP_POLY_OFFSET: case OP_PATCH_SIZE: case OP_PRIMITIVE_RESTART: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
+            case OP_POLY_OFFSET: case OP_PATCH_SIZE: case OP_PRIMITIVE_RESTART: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_COPY_STRIDE:
                 if (h.op == OP_BIND_UBO) { const p_bind_buf *b = a; PD("Y bind_ubo cmd=%p st%d reg%d addr=%#llx size=%llu", p, b->stage, b->index, (unsigned long long)b->addr, (unsigned long long)b->size); }
                 state_op(h.op, a); break;
             case OP_COPY_B2T: copy_b2t(a); break;

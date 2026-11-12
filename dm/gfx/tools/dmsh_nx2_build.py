@@ -369,6 +369,55 @@ def varying_outputs(src):
     return sum(1 << int(loc) for loc in re.findall(r'user\(locn(\d+)\)', output[1])) if output else 0
 
 
+def fragment_alpha_test(src):
+    """Apply NVN's ordered alpha comparison to color zero before exports.
+
+    Metal has no fixed-function alpha test. As in the pinned compiler's
+    AlphaTest epilogue, shaders with no color-zero export are unaffected.
+    Function constants let the default ALWAYS path eliminate discard entirely.
+    Run before fragment_output_types so the comparison sees the float register
+    value even when the color attachment later interprets those bits as integer.
+    """
+    entry = re.search(r'\bfragment\s+main0_out\s+main0\s*\(', src)
+    if not entry:
+        return src, False
+    prefix, body = src[:entry.start()], src[entry.start():]
+    field = re.search(r'\bfloat4\s+(\w+)\s+\[\[color\(0\)\]\]', prefix)
+    expression = f'out.{field[1]}.w' if field else None
+    # Also accept a retained source already processed by fragment_output_types.
+    # This permits upgrading an existing compiled package without re-extracting
+    # shaders, while preserving the original register-to-attachment conversion.
+    if (not expression and 'function_constant(dm_color_0_f)' in prefix and
+            re.search(r'\bfloat4\s+dm_color_0\s*=', body)):
+        expression = 'dm_color_0.w'
+    if not expression:
+        return src, False
+    if 'dm_alpha_func' in src:
+        raise ValueError('alpha test already generated')
+    if 'return out;' not in body:
+        raise ValueError('unrecognized alpha-test fragment return')
+    helper = '''constant uint dm_alpha_func [[function_constant(192)]];
+constant float dm_alpha_ref [[function_constant(193)]];
+static inline bool dm_alpha_pass(float alpha) {
+    if (dm_alpha_func == 8) return true;
+    if (dm_alpha_func == 1 || isnan(alpha) || isnan(dm_alpha_ref)) return false;
+    switch (dm_alpha_func) {
+        case 2: return alpha < dm_alpha_ref;
+        case 3: return alpha == dm_alpha_ref;
+        case 4: return alpha <= dm_alpha_ref;
+        case 5: return alpha > dm_alpha_ref;
+        case 6: return alpha != dm_alpha_ref;
+        case 7: return alpha >= dm_alpha_ref;
+        default: return false;
+    }
+}
+
+'''
+    body = body.replace('return out;',
+                        f'if (!dm_alpha_pass({expression})) discard_fragment();\n    return out;')
+    return prefix + helper + body, True
+
+
 def fragment_inputs(src):
     """Use the compiler's (0,0,0,1) default when the prior stage omits a varying."""
     entry = re.search(r'\bfragment\s+main0_out\s+main0\s*\(', src)
@@ -463,6 +512,9 @@ def main():
             src, mask = fragment_inputs(src)
             if mask:
                 reflection['fragment_inputs'] = dict(version=1, constant_base=160, mask=mask)
+            src, alpha = fragment_alpha_test(src)
+            if alpha:
+                reflection['alpha_test'] = dict(version=1, function_constant=192, reference_constant=193)
             src, mask = fragment_output_types(src)
             if mask:
                 reflection['color_output_types'] = dict(version=1, constant_base=128, mask=mask)
