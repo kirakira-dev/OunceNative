@@ -617,17 +617,42 @@ def glslc_done(d):  # The GLSLC header stores its total size at offset 0x44.
 
 
 def build_mac_host(repo, out, env, logs, g):
-    """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's"""
-    host = repo / 'dm/host'
-    run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a'], logs / 'mac_host_make.log', env=env, cwd=host)
-    dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', 'dmhost'], env=env, cwd=host, capture_output=True, text=True)
-    line = next((l for l in dry.stdout.splitlines() if ' -o dmhost ' in l), None)
-    if not line: raise BuildError(f'make -n gave no compile line for the Mac host: {dry.stderr.strip()[-500:]}')
-    cmd = shlex.split(line); cmd[cmd.index('-o') + 1] = out
-    out.parent.mkdir(parents=True, exist_ok=True)
-    run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
-    return out
+    """Compile with an isolated header and the exact selected profile.
 
+    Explicit profile paths can override a checked-in profile with the same ID.
+    Capture and Mac package builds must not replace dm/host/dmhost or share a
+    generated profile header with another game's build.
+    """
+    import fcntl, uuid
+    import game as gamemod
+    host = repo / 'dm/host'
+    generated = host / 'gen' / ('port-' + uuid.uuid4().hex)
+    generated.mkdir(parents=True)
+    (generated / 'profile').symlink_to(g.dir, target_is_directory=True)
+    # make's game.py header <id> would prefer the checked-in same-ID profile.
+    # Generate this header from the selected object, then use make only for the
+    # shared dependency and to obtain the current native compiler invocation.
+    (generated / 'game_profile.h').write_text(gamemod.header(g))
+    rel = generated.relative_to(host)
+    settings = [f'GAME={g.id}', f'GAME_DIR={rel}/profile',
+                f'GAME_H={rel}/game_profile.h', f'GAME_STAMP={rel}/game.stamp']
+    try:
+        with (host / 'gen/mac-port.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            run(['make', '-s', *settings, 'gen/vpx/libvpx.a'],
+                logs / 'mac_host_make.log', env=env, cwd=host)
+        dry = subprocess.run(['make', '-n', '-B', *settings, 'dmhost'], env=env,
+                             cwd=host, capture_output=True, text=True, check=True)
+        line = next((line for line in dry.stdout.splitlines() if ' -o dmhost ' in line), None)
+        if not line:
+            raise BuildError(f'make gave no Mac host compile command: {dry.stderr[-500:]}')
+        command = shlex.split(line)
+        command[command.index('-o') + 1] = str(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        run(command, logs / 'mac_host_build.log', env=env, cwd=host)
+    finally:
+        shutil.rmtree(generated)
+    return out
 
 def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     """Profiles with shader_glslc_capture on (Fire Emblem: Three Houses): the game compiles some shaders at run time with its own GLSLC, so no game file holds them. The game boots in the Mac host

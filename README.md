@@ -31,6 +31,8 @@ make -C dm/host GAME=TID_HERE (eg 0400A3A01EE4C000 for pokopia)
 
 That builds the host executable. Running the game also requires extracted files, rewritten modules, and a matching shader package. Start with the [Pokopia setup notes](docs/pokopia.md). The shader compiler patches are in [patches/pokedinner](patches/pokedinner).
 
+For a reusable Mac build command across Switch and Switch 2 profiles, see the [native Mac build workflow](docs/mac-port.md). `python3 scripts/port.py profiles` lists profiles; `plan` shows the stages and `build` produces a signed app with a build report.
+
 The inherited iOS build scripts and game profiles are still available. See [iPhone and iPad](docs/ios.md) and [development notes](docs/development.md).
 
 ## Credits
