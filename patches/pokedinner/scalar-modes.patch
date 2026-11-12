@@ -1,0 +1,122 @@
+diff --git a/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h b/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
+--- a/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
++++ b/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
+@@ -817,14 +817,14 @@
+                  (u64{source} << 20) | (u64{15} << 39));
+             break;
+         }
+-        case 0xab9: case 0xabb: { // ULDC U32/U64, direct or indexed.
++        case 0xab9: case 0xabb: { // ULDC U8/U32/U64, direct or indexed.
+             const u32 uniform_dest = insn.Bits(16, 8), index_reg = insn.Bits(24, 8);
+             const u32 width = insn.Bits(73, 3);
+             const u32 target = uniform_register(uniform_dest);
+             const u32 index_target = opcode == 0xabb ? uniform_register(index_reg) : 255U;
+-            if (target == ~0U || target == 255 || (width != 4 && width != 5) ||
++            if (target == ~0U || target == 255 || (width != 0 && width != 4 && width != 5) ||
+                 (width == 5 && ((uniform_dest & 1) || uniform_register(uniform_dest + 1) != target + 1)) ||
+-                bank() >= 18 || insn.Bits(38, 16) % 4 || insn.Bits(62, 2) ||
++                bank() >= 18 || (width != 0 && insn.Bits(38, 16) % 4) || insn.Bits(62, 2) ||
+                 (insn.words[2] & ~0xe00U) != (opcode == 0xab9 ? 0U : 0x08000000U) ||
+                 index_target == ~0U)
+                 return fail(index, "native uniform constant load mode");
+@@ -2213,10 +2213,11 @@
+         }
+         case 0x306: case 0xd06: { // I2F.F32.U8, selected byte, round-to-nearest (0xd06: uniform source)
+             const u32 source = opcode == 0xd06 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
+-            if (opcode == 0x306 && insn.words[2] == 0x00101000 && !(insn.words[1] & 0xcfffff00U)) {
+-                // I2F.U16 Rd, Rs(.H1): Maxwell's 16-bit source format, byte selector 0 or 2.
++            if ((insn.words[2] & ~0x400U) == (opcode == 0xd06 ? 0x08101000U : 0x00101000U) &&
++                !(insn.words[1] & 0xefffff00U) && source != ~0U) {
++                // I2F.U16/S16 Rd, Rs(.H1): halfword selector maps to byte 0 or 2.
+                 emit(base(0x5cb8000000000000ULL) | (u64{2} << 8) | (u64{1} << 10) | (u64{source} << 20) |
+-                     (u64{insn.Bits(60, 2) * 2} << 41));
++                     (u64{insn.Bits(74, 1)} << 13) | (u64{insn.Bits(60, 1) * 2} << 41));
+                 break;
+             }
+             if (insn.words[2] != (opcode == 0xd06 ? 0x08001000U : 0x1000U) ||
+diff --git a/src/tests/CMakeLists.txt b/src/tests/CMakeLists.txt
+--- a/src/tests/CMakeLists.txt
++++ b/src/tests/CMakeLists.txt
+@@ -22,6 +22,7 @@
+     video_core/ampere_returns.cpp
+     video_core/ampere_quad_gradients.cpp
+     video_core/ampere_texture_half.cpp
++    video_core/ampere_scalar_modes.cpp
+     input_common/calibration_configuration_job.cpp
+ )
+ 
+diff --git a/src/tests/video_core/ampere_scalar_modes.cpp b/src/tests/video_core/ampere_scalar_modes.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/tests/video_core/ampere_scalar_modes.cpp
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include <array>
++#include <bit>
++#include <cstdio>
++#include <stdexcept>
++#include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
++#ifndef AMPERE_SCALAR_MODES_STANDALONE
++#include <catch2/catch_test_macros.hpp>
++#endif
++
++namespace {
++using namespace Shader::Ampere;
++void Check(bool condition) {
++    if (!condition) throw std::runtime_error("scalar mode regression");
++}
++LoweredProgram Lower(Instruction instruction) {
++    const std::array<Instruction, 2> code{{instruction, {{0x0000794d, 0, 0x03800000, 0}}}};
++    return LowerToMaxwell(code);
++}
++unsigned CheckScalarModes() {
++    unsigned checked = 0;
++    for (unsigned uniform = 0; uniform < 2; ++uniform) {
++        for (unsigned sign = 0; sign < 2; ++sign) {
++            for (unsigned high = 0; high < 2; ++high) {
++                const auto program = Lower({{uniform ? 0x00017d06U : 0x00017306U, 2U | (high << 28),
++                                             0x00101000U | (sign << 10) | (uniform << 27), 0}});
++                Check(bool(program));
++                const u64 op = program.instructions[0];
++                Check((op >> 48) == 0x5cb8 && (op & 255) == 1 && ((op >> 20) & 255) == (uniform ? 218 : 2));
++                Check(((op >> 8) & 3) == 2 && ((op >> 10) & 3) == 1);
++                Check(((op >> 13) & 1) == sign && ((op >> 41) & 3) == high * 2);
++                for (unsigned value = 0; value < 65536; ++value) {
++                    const u32 source = high ? (value << 16) | 0xa55aU : value | 0xa55a0000U;
++                    const u32 half = (source >> (((op >> 41) & 3) * 8)) & 65535;
++                    const int actual = ((op >> 13) & 1) && (half & 32768) ? int(half) - 65536 : int(half);
++                    const int expected = sign && value >= 32768 ? int(value) - 65536 : int(value);
++                    Check(std::bit_cast<u32>(float(actual)) == std::bit_cast<u32>(float(expected)));
++                    ++checked;
++                }
++            }
++        }
++    }
++    Check(!Lower({{0x00017306, 0x20000002, 0x00101400, 0}}));
++    Check(!Lower({{0x00017306, 2, 0x00105400, 0}}));
++    for (unsigned indexed = 0; indexed < 2; ++indexed) {
++        for (unsigned offset = 0; offset < 16; ++offset) {
++            const auto program = Lower({{0x00067ab9U | (indexed ? 0x02000002U : 0U),
++                                        (4U << 22) | (offset << 6), indexed ? 0x08000000U : 0U, 0}});
++            Check(bool(program));
++            const u64 op = program.instructions[0];
++            Check((op >> 52) == 0xef9 && (op & 255) == 222);
++            Check(((op >> 48) & 7) == 0 && ((op >> 36) & 31) == 4);
++            Check(((op >> 20) & 65535) == offset && ((op >> 8) & 255) == (indexed ? 218 : 255));
++            ++checked;
++        }
++    }
++    Check(!Lower({{0x00067ab9, 0x01000040, 0x00000800, 0}}));
++    Check(!Lower({{0x00067ab9, 0x01000000, 0x00000c00, 0}}));
++    return checked;
++}
++} // namespace
++#ifdef AMPERE_SCALAR_MODES_STANDALONE
++int main() {
++    std::printf("PASS %u scalar conversion and load cases\n", CheckScalarModes());
++}
++#else
++TEST_CASE("Ampere scalar conversions and uniform byte loads", "[video_core][ampere]") {
++    REQUIRE(CheckScalarModes() == 524320);
++}
++#endif
