@@ -2,14 +2,15 @@
 #include <assert.h>
 #include <stdatomic.h>
 #include <signal.h>
+#include <time.h>
 #include "../dm_test_control.c"
 
 static _Atomic int input_writes, frozen, calls;
 static uint64_t buttons;
 static int32_t axes[4];
 static struct { uint64_t buttons; int32_t axes[4]; } published[8];
-static float motion[2];
 static char shot_path[1024];
+uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000000ull+t.tv_nsec; }
 void dm_input_set(uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     buttons=b; axes[0]=lx; axes[1]=ly; axes[2]=rx; axes[3]=ry;
     int i=atomic_load(&input_writes); assert(i<8);
@@ -17,7 +18,6 @@ void dm_input_set(uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     atomic_fetch_add(&input_writes, 1);
 }
 void guest_clock_freeze_for(int reason, int on) { assert(reason == 3); atomic_store(&frozen, on); }
-void dm_motion_rotate(float p, float y) { motion[0]=p; motion[1]=y; }
 void dm_gfx_shot_at(long k, const char *path) { assert(k == 1); snprintf(shot_path,sizeof shot_path,"%s",path); }
 static void *drive(void *unused) {
     (void)unused;
@@ -31,8 +31,10 @@ static void wait_at(int f) {
 static void put(int fd,const char *s) { assert(write(fd,s,strlen(s))==(ssize_t)strlen(s)); }
 int main(void) {
     alarm(10);
+    dm_motion_state sensor;
+    dm_motion_start(0,1);
     unsetenv("DM_TEST_CONTROL"); dm_test_control_frame(0);
-    assert(!input_writes && !frozen); g_control_init=0;
+    assert(!input_writes && !frozen && !dm_motion_read(&sensor,1,0)); g_control_init=0;
     char dir[]="/tmp/dm-test-control-XXXXXX"; assert(mkdtemp(dir));
     char path[256]; snprintf(path,sizeof path,"%s/commands",dir); assert(!mkfifo(path,0600));
     setenv("DM_TEST_CONTROL",path,1); setenv("DM_TEST_CONTROL_START","2",1);
@@ -42,7 +44,8 @@ int main(void) {
     assert(calls==1 && frozen && buttons==0); // no newline: no partial input
     put(fd," -0.2\n"); wait_at(4);
     // Frames 2, 3, 4 ran and frame 5 is waiting with input released.
-    assert(buttons==0 && input_writes==3 && fabsf(motion[0]-.1f)<1e-6f && fabsf(motion[1]+.2f)<1e-6f);
+    assert(buttons==0 && input_writes==3 && dm_motion_read(&sensor,1,0)==1);
+    assert(fabsf(sensor.direction[2][1]-sinf(.1f))<1e-6f && fabsf(sensor.direction[1][0]-sinf(.2f))<1e-6f);
     assert(published[1].buttons==512 && published[1].axes[0]==12 && published[1].axes[1]==-34 &&
            published[1].axes[2]==56 && published[1].axes[3]==-78);
     put(fd,"step 0 0 0 0 0 0 0 0\nstep 2 0 0 0 0 0 nan 0\nstep 2 0 32768 0 0 0 0 0\n");

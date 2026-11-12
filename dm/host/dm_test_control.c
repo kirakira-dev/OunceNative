@@ -58,6 +58,9 @@ void dm_test_control_frame(uint64_t frame) {
             return;
         }
         g_control_fd = fd;
+        // The window normally enables the virtual sensor. Windowless hosts
+        // need the same source when this diagnostic channel is selected.
+        dm_motion_available(1);
         const char *start = getenv("DM_TEST_CONTROL_START");
         g_control_start = start ? strtoull(start, NULL, 10) : 0;
     }
